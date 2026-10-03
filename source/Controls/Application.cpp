@@ -1,3 +1,4 @@
+#include "Diagnostics/Probes.h"
 /****************************************************************************
  * Copyright (C) 2009-2011 Dimok
  *
@@ -24,7 +25,7 @@
 #include "DeviceControls/DeviceHandler.hpp"
 #include "TextOperations/FontSystem.h"
 #include "FTPOperations/FTPServer.h"
-#include "Prompts/HomeMenu.h"
+#include "Diagnostics/HbcAgent.h"
 #include "Prompts/ProgressWindow.h"
 #include "Prompts/ThrobberWindow.h"
 #include "SoundOperations/SoundHandler.hpp"
@@ -39,13 +40,17 @@
 #include "sys.h"
 
 Application *Application::instance = NULL;
-bool Application::exitApplication = false;
-bool Application::bReset = false;
-bool Application::bShutdown = false;
+std::atomic_bool Application::exitApplication(false);
+std::atomic_bool Application::bReset(false);
+std::atomic_bool Application::bShutdown(false);
 
 Application::Application()
-	: GuiFrame(screenwidth, screenheight) // screenwidth and height are defined in Video.h
+	: GuiFrame(screenwidth, screenheight), m_mutex(true) // delete callbacks may reenter queue helpers
 {
+	renderThread = LWP_GetSelf();
+#if WX_DEBUG_BUILD
+	smokeFrames = 0;
+#endif
 	GXColor ImgColor[4];
 	ImgColor[0] = RGBATOGXCOLOR(Settings.BackgroundUL);
 	ImgColor[1] = RGBATOGXCOLOR(Settings.BackgroundUR);
@@ -80,53 +85,68 @@ Application::~Application()
 
 void Application::quit()
 {
-	// Fade out...
-	for(int i = 0; i <= 255; i += 15)
-	{
-		Draw();
-		GXColor fadeoutColor = (GXColor){0, 0, 0, i};
-		Menu_DrawRectangle(0, 0, 100.0f, screenwidth, screenheight, &fadeoutColor, false, true);
-		Menu_Render();
-	}
-
-	exitApplication = true;
+    // Worker/task cleanup may already have removed scene owners. Do not draw
+    // a shutdown fade through dangling GUI children; keep the completed frame
+    // until GX is drained and the video system returns to the loader.
+    exitApplication = true;
 }
 
 void Application::hide()
 {
-	RemoveAll();
+    RemoveAll();
 }
 
 void Application::show()
 {
-	Append(bgImg);
-	Append(MusicPlayer::Instance());
-	Append(ProgressWindow::Instance());
-	//! Append taskbar instance
-	Append(Taskbar::Instance());
+    Append(bgImg);
+    Append(MusicPlayer::Instance());
+    Append(ProgressWindow::Instance());
+    Append(Taskbar::Instance());
 }
 
 void Application::exec()
 {
+#if WX_DEBUG_BUILD
+	u32 started = frameCount;
+#endif
 	while(!exitApplication)
 	{
 		updateEvents();
+#if WX_DEBUG_BUILD
+		if (smokeFrames && frameCount-started >= smokeFrames) closeRequest();
+#endif
 	}
 
-	ExitApp();
 }
 
 void Application::updateEvents()
 {
+	// Worker prompts wait for the main loop; only this thread submits GX commands.
+	if (LWP_GetSelf() != renderThread) {
+		WX_PROBE(THREADS, 3, 1);
+		usleep(1000);
+		return;
+	}
+	{
+	WX_SCOPE(CPU);
+	WX_PROBE(CPU, 1, 1);
 	if(exitApplication)
 		return;
 
 	if(bShutdown) {
 		Sys_Shutdown();
+		return;
 	}
-	else if(bReset) {
+	if (HbcAgentExitRequested()) {
+		Sys_LoadHBC();
+		return;
+	}
+	if(bReset) {
 		Sys_Reboot();
+		return;
 	}
+
+	if (HbcAgentHomePending()) homePending = true;
 
 	//! first update the inputs
 	UpdatePads();
@@ -140,16 +160,22 @@ void Application::updateEvents()
 	{
 		for (int i = 0; i < 4; i++)
 		{
-			if(!updateOnlyElement.empty())
-				updateOnlyElement.back()->Update(&userInput[i]);
-			else
-				Update(&userInput[i]);
+			m_mutex.lock();
+			GuiElement *active = updateOnlyElement.empty() ? NULL : updateOnlyElement.back();
+			m_mutex.unlock();
+			if(active) active->Update(&userInput[i]);
+			else Update(&userInput[i]);
 
+			if (exitApplication) return;
 			//! always update the home menu, everywhere
 			btnHome->Update(&userInput[i]);
+			if (exitApplication) return;
 		}
 	}
 
+	if (frameCount % 120 == 0) {
+		WX_PROBE(CPU, 3, !MEM2_check());
+	}
 	//! render everything
 	Draw();
 
@@ -157,15 +183,20 @@ void Application::updateEvents()
 	for (int i = 3; i >= 0; i--)
 		pointer[i]->Draw();
 
+	} // CPU timing ends before GPU completion and the intentional VSync wait.
 	//! render to screen
 	Menu_Render();
 
 	//! delete elements that were queued for delete after the rendering is done
-	if(!deleteList.empty())
-		ProcessDeleteQueue();
+	ProcessDeleteQueue();
 	//! execute tasks that require main thread execution
-	if(!postUpdateTasks.empty())
-		ProcessPostUpdateTasks();
+	ProcessPostUpdateTasks();
+	if (exitApplication) return;
+	// The agent owns VI/input while open. Enter only between completed GX frames.
+	if (homePending) {
+		homePending = false;
+		HbcAgentHome();
+	}
 }
 
 void Application::SetGrabPointer(int i)
@@ -232,16 +263,17 @@ void Application::PushForDelete(GuiElement *e)
 
 void Application::ProcessPostUpdateTasks(void)
 {
-	while(!postUpdateTasks.empty())
-	{
-		m_mutex.lock();
-		ThreadedTask *task = postUpdateTasks.front();
-		postUpdateTasks.pop();
-		m_mutex.unlock();
-
-		task->Execute();
-		delete task;
-	}
+    while (!exitApplication) {
+        m_mutex.lock();
+        ThreadedTask *task = postUpdateTasks.empty() ? NULL : postUpdateTasks.front();
+        if (task) postUpdateTasks.pop();
+        m_mutex.unlock();
+        if (!task) break;
+        task->Execute();
+        delete task;
+        // A homebrew booter may have destroyed this application during Execute().
+        if (exitApplication) return;
+    }
 }
 
 /***********************************************************
@@ -340,15 +372,13 @@ void Application::init(void)
 	SoundHandler::Instance();
 
 	//! Initialize network thread if selected
-	if(Settings.AutoConnect)
+	HbcAgentInit(); // IOS reload, mounts, pads and stdout are ready now.
+	if(Settings.AutoConnect || Settings.FTPServer.AutoStart)
 	{
 		InitNetworkThread();
 		ResumeNetworkThread();
 	}
 
-	//! FTP Server thread
-	if(Settings.FTPServer.AutoStart)
-		FTPServer::Instance()->StartupFTP();
 
 	//! Initialize the task thread
 	ThreadedTaskHandler::Instance()->setThreadPriority(Settings.CopyThreadPrio);
@@ -394,17 +424,5 @@ void Application::init(void)
 
 void Application::OnHomeButtonClick(GuiButton *sender UNUSED, int pointer UNUSED, const POINT &p3 UNUSED)
 {
-	// disable home menu button clicks while we are inside the home menu
-	btnHome->SetClickable(false);
-
-	HomeMenu *homeMenu = new HomeMenu();
-	homeMenu->DimBackground(true);
-	homeMenu->Closing.connect(this, &Application::OnHomeMenuClosing);
-	this->SetUpdateOnly(homeMenu);
-	this->Append(homeMenu);
-}
-
-void Application::OnHomeMenuClosing(GuiFrame *menu UNUSED)
-{
-	btnHome->SetClickable(true);
+	homePending = true;
 }

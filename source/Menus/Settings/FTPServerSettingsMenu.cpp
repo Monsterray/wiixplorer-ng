@@ -36,6 +36,9 @@ void FTPServerSettingsMenu::SetupOptions()
 	options.SetName(i++, tr("Auto Start:"));
 	options.SetName(i++, tr("Password:"));
 	options.SetName(i++, tr("FTP Port:"));
+	options.SetName(i++, tr("Username:"));
+	options.SetName(i++, tr("Anonymous Access:"));
+	options.SetName(i++, tr("Idle Timeout (seconds):"));
 
 	SetOptionValues();
 }
@@ -55,6 +58,9 @@ void FTPServerSettingsMenu::SetOptionValues()
 		options.SetValue(i++," ");
 
 	options.SetValue(i++,"%i", Settings.FTPServer.Port);
+	options.SetValue(i++,"%s", Settings.FTPServer.User);
+	options.SetValue(i++, Settings.FTPServer.Anonymous ? tr("ON (read-only)") : tr("OFF"));
+	options.SetValue(i++,"%u", Settings.FTPServer.IdleTimeout);
 
 }
 
@@ -70,7 +76,7 @@ void FTPServerSettingsMenu::OnOptionClick(GuiOptionBrowser *sender UNUSED, int o
 			break;
 		case 1:
 			entered[0] = 0;
-			result = OnScreenKeyboard(entered, 149);
+			result = OnScreenKeyboard(entered, sizeof(Settings.FTPServer.Password)-1);
 			if(result)
 				snprintf(Settings.FTPServer.Password, sizeof(Settings.FTPServer.Password), "%s", entered);
 			break;
@@ -78,7 +84,22 @@ void FTPServerSettingsMenu::OnOptionClick(GuiOptionBrowser *sender UNUSED, int o
 			snprintf(entered, sizeof(entered), "%d", Settings.FTPServer.Port);
 			result = OnScreenKeyboard(entered, 149);
 			if(result)
-				Settings.FTPServer.Port = (u16) atoi(entered);
+				{ int port = atoi(entered); if (port >= 1 && port <= 65535) Settings.FTPServer.Port = port; }
+			break;
+		case 3:
+			snprintf(entered,sizeof(entered),"%s",Settings.FTPServer.User);
+			if (OnScreenKeyboard(entered,sizeof(Settings.FTPServer.User)-1))
+				snprintf(Settings.FTPServer.User,sizeof(Settings.FTPServer.User),"%s",entered);
+			break;
+		case 4:
+			Settings.FTPServer.Anonymous = !Settings.FTPServer.Anonymous;
+			break;
+		case 5:
+			snprintf(entered,sizeof(entered),"%u",Settings.FTPServer.IdleTimeout);
+			if (OnScreenKeyboard(entered,5)) {
+				int seconds = atoi(entered);
+				if (seconds >= 1 && seconds <= 86400) Settings.FTPServer.IdleTimeout = seconds;
+			}
 			break;
 		default:
 			break;

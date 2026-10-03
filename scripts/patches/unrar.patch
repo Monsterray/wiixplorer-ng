@@ -1,0 +1,11 @@
+--- a/file.cpp
++++ b/file.cpp
+@@ -79,7 +79,7 @@
+   int handle=sopen(Name,flags,sflags);
+ #else
+   int handle=open(Name,flags);
+-#ifdef LOCK_EX
++#if defined(LOCK_EX) && !defined(GEKKO)
+ 
+ #ifdef _OSF_SOURCE
+   extern "C" int flock(int, int);

@@ -1,3 +1,5 @@
+#include "FileOperations/TransferFile.h"
+#include "network/TransferSocket.h"
 /*
 
 ftpii -- an FTP server for the Wii
@@ -53,6 +55,13 @@ static const u32 CRLF_LENGTH = 2;
 static u8 num_clients = 0;
 static u16 passive_port = 1024;
 static char *password = NULL;
+static char ftp_username[50];
+static bool allow_anonymous;
+static unsigned idle_timeout = 300;
+void set_ftp_username(const char *user, bool anonymous) {
+    snprintf(ftp_username,sizeof(ftp_username),"%s",user ? user : ""); allow_anonymous = anonymous;
+}
+void set_ftp_idle_timeout(unsigned seconds) { idle_timeout = seconds ? seconds : 300; }
 
 typedef s32 (*data_connection_callback)(s32 data_socket, void *arg);
 
@@ -66,13 +75,17 @@ struct client_struct {
 	off_t restart_marker;
 	struct sockaddr_in address;
 	bool authenticated;
+    bool username_valid;
+    bool anonymous;
 	char buf[FTP_BUFFER_SIZE];
 	s32 offset;
 	bool data_connection_connected;
 	data_connection_callback data_callback;
 	void *data_connection_callback_arg;
 	void (*data_connection_cleanup)(void *arg);
+	u64 control_deadline;
 	u64 data_connection_timer;
+	u64 data_connection_deadline;
 };
 
 typedef struct client_struct client_t;
@@ -157,12 +170,16 @@ static u32 split(char *s, char sep, u32 maxsplit, char *result[]) {
 	return num_results;
 }
 
-static s32 ftp_USER(client_t *client, char *username UNUSED) {
-	return write_reply(client, 331, "User name okay, need password.");
+static s32 ftp_USER(client_t *client, char *username) {
+    client->authenticated = false;
+    client->anonymous = allow_anonymous && !strcmp(username,"anonymous");
+    client->username_valid = !strcmp(username,ftp_username);
+    if (client->anonymous) { client->authenticated = true; return write_reply(client,230,"User logged in, proceed."); }
+    return write_reply(client,client->username_valid ? 331 : 530,client->username_valid ? "User name okay, need password." : "Login incorrect.");
 }
 
 static s32 ftp_PASS(client_t *client, char *password_attempt) {
-	if (compare_ftp_password(password_attempt)) {
+	if (client->username_valid && password && compare_ftp_password(password_attempt)) {
 		client->authenticated = true;
 		return write_reply(client, 230, "User logged in, proceed.");
 	} else {
@@ -174,7 +191,7 @@ static s32 ftp_REIN(client_t *client, char *rest UNUSED) {
 	close_passive_socket(client);
 	strcpy(client->cwd, "/");
 	client->representation_type = 'A';
-	client->authenticated = false;
+	client->authenticated = false; client->username_valid = false; client->anonymous = false;
 	return write_reply(client, 220, "Service ready for new user.");
 }
 
@@ -189,7 +206,7 @@ static s32 ftp_SYST(client_t *client, char *rest UNUSED) {
 }
 
 static s32 ftp_TYPE(client_t *client, char *rest) {
-	char representation_type[FTP_BUFFER_SIZE], param[FTP_BUFFER_SIZE];
+	char representation_type[FTP_BUFFER_SIZE] = {0}, param[FTP_BUFFER_SIZE] = {0};
 	char *args[] = { representation_type, param };
 	u32 num_args = split(rest, ' ', 1, args);
 	if (num_args == 0) {
@@ -287,8 +304,8 @@ static s32 ftp_RNTO(client_t *client, char *path) {
 static s32 ftp_SIZE(client_t *client, char *path) {
 	struct stat st;
 	if (!vrt_stat(client->cwd, path, &st)) {
-		char size_buf[12];
-		sprintf(size_buf, "%llu", st.st_size);
+		char size_buf[32];
+		snprintf(size_buf, sizeof(size_buf), "%llu", (unsigned long long)st.st_size);
 		return write_reply(client, 213, size_buf);
 	} else {
 		return write_reply(client, 550, strerror(errno));
@@ -297,27 +314,12 @@ static s32 ftp_SIZE(client_t *client, char *path) {
 
 static s32 ftp_PASV(client_t *client, char *rest UNUSED) {
 	close_passive_socket(client);
-	client->passive_socket = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-	if (client->passive_socket < 0) {
-		return write_reply(client, 520, "Unable to create listening socket.");
-	}
-	set_blocking(client->passive_socket, false);
-	struct sockaddr_in bindAddress;
-	memset(&bindAddress, 0, sizeof(bindAddress));
-	bindAddress.sin_family = AF_INET;
-	bindAddress.sin_port = htons(passive_port++); // XXX: BUG: This will overflow eventually, with interesting results...
-	bindAddress.sin_addr.s_addr = htonl(INADDR_ANY);
-	s32 result;
-	if ((result = net_bind(client->passive_socket, (struct sockaddr *)&bindAddress, sizeof(bindAddress))) < 0) {
-		close_passive_socket(client);
-		return write_reply(client, 520, "Unable to bind listening socket.");
-	}
-	if ((result = net_listen(client->passive_socket, 1)) < 0) {
-		close_passive_socket(client);
-		return write_reply(client, 520, "Unable to listen on socket.");
-	}
+    u16 port = passive_port++;
+    if (passive_port < 1024) passive_port = 1024;
+    client->passive_socket = create_server(port);
+    if (client->passive_socket < 0)
+        return write_reply(client, 520, "Unable to create data listener.");
 	char reply[49];
-	u16 port = bindAddress.sin_port;
 	u32 ip = net_gethostip();
 	struct in_addr addr;
 	addr.s_addr = ip;
@@ -331,12 +333,16 @@ static s32 ftp_PORT(client_t *client, char *portspec) {
 	if (sscanf(portspec, "%3u,%3u,%3u,%3u,%3u,%3u", &h1, &h2, &h3, &h4, &p1, &p2) < 6) {
 		return write_reply(client, 501, "Syntax error in parameters.");
 	}
+	if (h1 > 255 || h2 > 255 || h3 > 255 || h4 > 255 || p1 > 255 || p2 > 255 || !(p1 || p2))
+        return write_reply(client, 501, "Invalid data address.");
 	char addr_str[44];
-	sprintf(addr_str, "%u.%u.%u.%u", h1, h2, h3, h4);
+	snprintf(addr_str, sizeof(addr_str), "%u.%u.%u.%u", h1, h2, h3, h4);
 	struct in_addr sin_addr;
 	if (!inet_aton(addr_str, &sin_addr)) {
 		return write_reply(client, 501, "Syntax error in parameters.");
 	}
+    if (sin_addr.s_addr != client->address.sin_addr.s_addr)
+        return write_reply(client, 501, "Data address must match the control peer.");
 	close_passive_socket(client);
 	u16 port = ((p1 &0xff) << 8) | (p2 & 0xff);
 	client->address.sin_addr = sin_addr;
@@ -350,12 +356,13 @@ typedef s32 (*data_connection_handler)(client_t *client, data_connection_callbac
 static s32 prepare_data_connection_active(client_t *client, data_connection_callback callback UNUSED, void *arg UNUSED) {
 	s32 data_socket = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
 	if (data_socket < 0) return data_socket;
-	set_blocking(data_socket, false);
+	if (set_blocking(data_socket, false) < 0) { net_close(data_socket); return -EIO; }
 	struct sockaddr_in bindAddress;
 	memset(&bindAddress, 0, sizeof(bindAddress));
 	bindAddress.sin_family = AF_INET;
+	bindAddress.sin_len = sizeof(bindAddress);
 	bindAddress.sin_port = htons(SRC_PORT);
-	bindAddress.sin_addr.s_addr = htonl(INADDR_ANY);
+	bindAddress.sin_addr.s_addr = net_gethostip();
 	s32 result;
 	if ((result = net_bind(data_socket, (struct sockaddr *)&bindAddress, sizeof(bindAddress))) < 0) {
 		net_close(data_socket);
@@ -387,16 +394,19 @@ static s32 prepare_data_connection(client_t *client, void *callback, void *arg, 
 			client->data_connection_callback_arg = arg;
 			client->data_connection_cleanup = cleanup;
 			client->data_connection_timer = gettime() + secs_to_ticks(30);
+			client->data_connection_deadline = gettime() + secs_to_ticks(4*3600);
 		}
 	}
 	return result;
 }
 
 static s32 send_nlst(s32 data_socket, DIR_P *iter) {
+    u64 deadline = wx_transfer_deadline(4*3600);
 	s32 result = 0;
 	char filename[MAXPATHLEN];
 	struct dirent *dirent = NULL;
 	while ((dirent = vrt_readdir(iter)) != 0) {
+        if (wx_transfer_expired(deadline)) return -ETIMEDOUT;
 		size_t end_index = strlen(dirent->d_name);
 		if(end_index + 2 >= MAXPATHLEN)
 			continue;
@@ -412,6 +422,7 @@ static s32 send_nlst(s32 data_socket, DIR_P *iter) {
 }
 
 static s32 send_list(s32 data_socket, DIR_P *iter) {
+    u64 deadline = wx_transfer_deadline(4*3600);
 	struct stat st;
 	s32 result = 0;
 	time_t mtime = 0;
@@ -420,6 +431,7 @@ static s32 send_list(s32 data_socket, DIR_P *iter) {
 	char line[MAXPATHLEN + 56 + CRLF_LENGTH + 1];
 	struct dirent *dirent = NULL;
 	while ((dirent = vrt_readdir(iter)) != 0) {
+        if (wx_transfer_expired(deadline)) return -ETIMEDOUT;
 
 		snprintf(filename, sizeof(filename), "%s/%s", iter->path, dirent->d_name);
 		if(stat(filename, &st) == 0)
@@ -454,7 +466,7 @@ static s32 ftp_NLST(client_t *client, char *path) {
 	}
 
 	s32 result = prepare_data_connection(client, send_nlst, dir, vrt_closedir);
-	if (result < 0) vrt_closedir(dir);
+	if (client->data_connection_callback_arg != dir) vrt_closedir(dir);
 	return result;
 }
 
@@ -486,7 +498,7 @@ static s32 ftp_LIST(client_t *client, char *path) {
 	}
 
 	s32 result = prepare_data_connection(client, send_list, dir, vrt_closedir);
-	if (result < 0) vrt_closedir(dir);
+	if (client->data_connection_callback_arg != dir) vrt_closedir(dir);
 	return result;
 }
 
@@ -506,46 +518,94 @@ static s32 ftp_RETR(client_t *client, char *path) {
 	client->restart_marker = 0;
 
 	s32 result = prepare_data_connection(client, send_from_file, f, fclose);
-	if (result < 0) fclose(f);
+	if (client->data_connection_callback_arg != f) fclose(f);
 	return result;
 }
 
-static s32 stor_or_append(client_t *client, FILE *f) {
-	if (!f) {
-		return write_reply(client, 550, strerror(errno));
-	}
-	s32 result = prepare_data_connection(client, recv_to_file, f, fclose);
-	if (result < 0) fclose(f);
-	return result;
+/* An upload owns its temporary directory until close and publication. */
+typedef struct {
+    FILE *file;
+    wx_transfer_file transfer;
+    char *destination;
+} upload_t;
+
+static void abort_upload(void *arg) {
+    upload_t *u = arg;
+    if (u->file) fclose(u->file);
+    wx_transfer_abort(&u->transfer);
+    free(u->destination);
+    free(u);
+}
+
+static s32 receive_upload(s32 socket, void *arg) {
+    upload_t *u = arg;
+    if (wx_transfer_cancelled()) return -EINTR;
+    off_t offset = ftello(u->file);
+    if (offset < 0 || (u64)offset > 8ULL*1024*1024*1024) return -EFBIG;
+    s32 result = recv_to_file(socket, u->file);
+    if (result > 0 && (u64)offset+result > 8ULL*1024*1024*1024) return -EFBIG;
+    if (result == 0) {
+        int closed = fclose(u->file);
+        u->file = NULL;
+        if (closed != 0) return -EIO;
+        if (wx_transfer_publish(&u->transfer, u->transfer.staged, u->destination) != 0)
+            return -EIO;
+    }
+    return result;
+}
+
+static s32 start_upload(client_t *client, char *path, bool append) {
+    upload_t *u = calloc(1, sizeof(*u));
+    s32 result;
+    if (!u) return write_reply(client, 550, "Out of memory.");
+    u->destination = to_real_path(client->cwd, path);
+    off_t restart = client->restart_marker;
+    client->restart_marker = 0;
+    if (!u->destination || wx_transfer_begin(&u->transfer, u->destination) != 0 ||
+        !(u->file = fopen(u->transfer.staged, "wb"))) goto failed;
+    if (append || restart) {
+        FILE *previous = fopen(u->destination, "rb");
+        if (!previous && restart) goto failed;
+        if (previous) {
+            char buffer[16384];
+            size_t n;
+            u64 deadline = gettime()+secs_to_ticks(4*3600), total = 0;
+            bool bad = false;
+            while ((n = fread(buffer, 1, sizeof(buffer), previous)) != 0) {
+                total += n;
+                if (total > 8ULL*1024*1024*1024 || wx_transfer_cancelled() || gettime() >= deadline ||
+                    fwrite(buffer, 1, n, u->file) != n) { bad = true; break; }
+            }
+            if (ferror(previous)) bad = true;
+            if (fclose(previous) != 0) bad = true;
+            if (bad || (restart && ((u64)restart > total || fseeko(u->file, restart, SEEK_SET)))) goto failed;
+        }
+    }
+    result = prepare_data_connection(client, receive_upload, u, abort_upload);
+    if (client->data_connection_callback_arg != u) abort_upload(u);
+    return result;
+failed:
+    abort_upload(u);
+    return write_reply(client, 550, "Cannot prepare safe upload.");
 }
 
 static s32 ftp_STOR(client_t *client, char *path) {
-	FILE *f = vrt_fopen(client->cwd, path, "wb");
-	int fd;
-	if (f) fd = fileno(f);
-	if (f && client->restart_marker && lseek(fd, client->restart_marker, SEEK_SET) != client->restart_marker) {
-		s32 lseek_error = errno;
-		fclose(f);
-		client->restart_marker = 0;
-		return write_reply(client, 550, strerror(lseek_error));
-	}
-	client->restart_marker = 0;
-
-	return stor_or_append(client, f);
+    return start_upload(client, path, false);
 }
 
 static s32 ftp_APPE(client_t *client, char *path) {
-	return stor_or_append(client, vrt_fopen(client->cwd, path, "ab"));
+    return start_upload(client, path, true);
 }
 
 static s32 ftp_REST(client_t *client, char *offset_str) {
-	off_t offset;
-	if (sscanf(offset_str, "%lli", &offset) < 1 || offset < 0) {
-		return write_reply(client, 501, "Syntax error in parameters.");
-	}
+    char *end;
+    errno = 0;
+    unsigned long long offset = strtoull(offset_str, &end, 10);
+    if (!*offset_str || *offset_str < '0' || *offset_str > '9' || *end || errno || offset > 8ULL*1024*1024*1024)
+        return write_reply(client, 501, "Invalid restart offset.");
 	client->restart_marker = offset;
 	char msg[FTP_BUFFER_SIZE];
-	sprintf(msg, "Restart position accepted (%lli).", offset);
+	snprintf(msg, sizeof(msg), "Restart position accepted (%llu).", offset);
 	return write_reply(client, 350, msg);
 }
 
@@ -674,7 +734,11 @@ static s32 process_command(client_t *client, char *cmd_line) {
 		return 0;
 	}
 
-	gxprintf("Got command: %s\n", cmd_line);
+	gxprintf("Got command: %.*s\n", (int)strcspn(cmd_line," \t"), cmd_line);
+    if (client->anonymous &&
+        (!strncasecmp(cmd_line,"STOR",4) || !strncasecmp(cmd_line,"APPE",4) || !strncasecmp(cmd_line,"DELE",4) ||
+         !strncasecmp(cmd_line,"MKD",3) || !strncasecmp(cmd_line,"RMD",3) || !strncasecmp(cmd_line,"RNFR",4) ||
+         !strncasecmp(cmd_line,"RNTO",4) || !strncasecmp(cmd_line,"SITE",4))) return write_reply(client,550,"Read-only access.");
 
 	const char **commands = unauthenticated_commands;
 	const ftp_command_handler *handlers = unauthenticated_handlers;
@@ -687,7 +751,12 @@ static s32 process_command(client_t *client, char *cmd_line) {
 	return dispatch_to_handler(client, cmd_line, commands, handlers);
 }
 
-static void cleanup_data_resources(client_t *client) {
+static s32 cleanup_data_resources(client_t *client) {
+    s32 result = 0;
+    if (client->data_callback == (data_connection_callback)send_from_file && client->data_connection_cleanup) {
+        if (fclose(client->data_connection_callback_arg)) result = -EIO;
+        client->data_connection_cleanup = NULL;
+    }
 	if (client->data_socket >= 0 && client->data_socket != client->passive_socket) {
 		net_close_blocking(client->data_socket);
 	}
@@ -700,6 +769,8 @@ static void cleanup_data_resources(client_t *client) {
 	client->data_connection_callback_arg = NULL;
 	client->data_connection_cleanup = NULL;
 	client->data_connection_timer = 0;
+	client->data_connection_deadline = 0;
+    return result;
 }
 
 static void cleanup_client(client_t *client) {
@@ -732,6 +803,9 @@ void cleanup_ftp() {
 static bool process_accept_events(s32 server) {
 	s32 peer;
 	struct sockaddr_in client_address;
+    memset(&client_address, 0, sizeof(client_address));
+    client_address.sin_family = AF_INET;
+    client_address.sin_len = sizeof(client_address);
 	socklen_t addrlen = sizeof(client_address);
 	while ((peer = net_accept(server, (struct sockaddr *)&client_address, &addrlen)) != -EAGAIN) {
 		if (peer < 0) {
@@ -753,6 +827,7 @@ static bool process_accept_events(s32 server) {
 			net_close(peer);
 			return true;
 		}
+		if (set_blocking(peer, false) < 0) { net_close(peer); free(client); return true; }
 		client->socket = peer;
 		client->representation_type = 'A';
 		client->passive_socket = -1;
@@ -761,12 +836,15 @@ static bool process_accept_events(s32 server) {
 		*client->pending_rename = '\0';
 		client->restart_marker = 0;
 		client->authenticated = false;
+        client->username_valid = false; client->anonymous = false;
 		client->offset = 0;
+        client->control_deadline = gettime()+secs_to_ticks(idle_timeout);
 		client->data_connection_connected = false;
 		client->data_callback = NULL;
 		client->data_connection_callback_arg = NULL;
 		client->data_connection_cleanup = NULL;
 		client->data_connection_timer = 0;
+	client->data_connection_deadline = 0;
 		memcpy(&client->address, &client_address, sizeof(client_address));
 		int client_index;
 		if (write_reply(client, 220, "ftpii") < 0) {
@@ -788,12 +866,21 @@ static bool process_accept_events(s32 server) {
 
 static void process_data_events(client_t *client) {
 	s32 result;
+	if (wx_transfer_cancelled() || gettime() >= client->data_connection_deadline ||
+		gettime() >= client->data_connection_timer) {
+		cleanup_data_resources(client);
+		write_reply(client, 426, "Transfer timed out or canceled."); return;
+	}
 	if (!client->data_connection_connected) {
 		if (client->passive_socket >= 0) {
-			struct sockaddr_in data_peer_address;
+			struct sockaddr_in data_peer_address = {0};
+            data_peer_address.sin_family = AF_INET;
+            data_peer_address.sin_len = sizeof(data_peer_address);
 			socklen_t addrlen = sizeof(data_peer_address);
 			result = net_accept(client->passive_socket, (struct sockaddr *)&data_peer_address ,&addrlen);
 			if (result >= 0) {
+                if (data_peer_address.sin_addr.s_addr != client->address.sin_addr.s_addr ||
+                    set_blocking(result, false) < 0) { net_close(result); return; }
 				client->data_socket = result;
 				client->data_connection_connected = true;
 			}
@@ -817,8 +904,10 @@ static void process_data_events(client_t *client) {
 		result = client->data_callback(client->data_socket, client->data_connection_callback_arg);
 	}
 
+	if (result > 0) client->data_connection_timer = gettime()+secs_to_ticks(30);
+    if (result >= 0) client->control_deadline = gettime()+secs_to_ticks(idle_timeout);
 	if (result <= 0 && result != -EAGAIN) {
-		cleanup_data_resources(client);
+		if (cleanup_data_resources(client) < 0) result = -EIO;
 		if (result < 0) {
 			result = write_reply(client, 520, "Closing data connection, error occurred during transfer.");
 		} else {
@@ -831,6 +920,7 @@ static void process_data_events(client_t *client) {
 }
 
 static void process_control_events(client_t *client) {
+    if (gettime() >= client->control_deadline) { cleanup_client(client); return; }
 	s32 bytes_read;
 	while (client->offset < (FTP_BUFFER_SIZE - 1)) {
 		if (client->data_callback) {
@@ -846,6 +936,7 @@ static void process_control_events(client_t *client) {
 		} else if (bytes_read == 0) {
 			goto recv_loop_end; // EOF from client
 		}
+		client->control_deadline = gettime()+secs_to_ticks(idle_timeout);
 		client->offset += bytes_read;
 		client->buf[client->offset] = '\0';
 
@@ -867,7 +958,7 @@ static void process_control_events(client_t *client) {
 				s32 result;
 				if ((result = process_command(client, next)) < 0) {
 					if (result != -EQUIT) {
-						gxprintf("Closing connection due to error while processing command: %s\n", next);
+						gxprintf("Closing connection due to error while processing command: %.*s\n", (int)strcspn(next," \t"), next);
 					}
 					goto recv_loop_end;
 				}
@@ -889,6 +980,19 @@ static void process_control_events(client_t *client) {
 }
 
 bool process_ftp_events(s32 server) {
+    // Wait for useful work. Poll includes data/control sockets so a live
+    // transfer wakes immediately; accept is still attempted after the wait
+    // because native IOS can omit listener readability.
+    struct pollsd sockets[1+2*MAX_CLIENTS];
+    unsigned count = 0, i;
+    sockets[count++] = (struct pollsd){server, 0x0003, 0};
+    for (i = 0; i < MAX_CLIENTS; ++i) if (clients[i]) {
+        sockets[count++] = (struct pollsd){clients[i]->socket, 0x0003, 0};
+        if (clients[i]->data_socket >= 0)
+            sockets[count++] = (struct pollsd){clients[i]->data_socket,
+                clients[i]->data_callback == send_from_file ? 0x0008 : 0x0003, 0};
+    }
+    if (net_poll(sockets, count, 10) < 0) usleep(10000);
 	bool network_down = !process_accept_events(server);
 	int client_index;
 	for (client_index = 0; client_index < MAX_CLIENTS; client_index++) {

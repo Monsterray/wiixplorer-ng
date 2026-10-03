@@ -70,7 +70,12 @@ void PackTask::Execute(void)
 		StartProgress(tr("Calculating transfer size..."));
 
 	list<ItemList> itemList;
-	GetItemList(itemList, false);
+    int planned = GetItemList(itemList, false);
+    if (planned < 0) {
+        if (planned != PROGRESS_CANCELED && !Application::isClosing())
+            ThrowMsg(tr("Error:"), tr("Unable to plan the selection. Try fewer items."));
+        TaskEnd(this); return;
+    }
 	list<ItemList>().swap(itemList);
 
 	ProgressWindow::Instance()->SetTitle(this->getTitle().c_str());

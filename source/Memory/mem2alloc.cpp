@@ -236,3 +236,26 @@ unsigned int CMEM2Alloc::FreeSize()
 
 	return size*sizeof(SBlock);
 }
+
+#if WX_PROBE_CPU && WX_PROBE_LEVEL >= 3
+#include <stdint.h>
+bool CMEM2Alloc::CheckIntegrity()
+{
+    LockMutex lock(m_mutex);
+    uintptr_t begin = reinterpret_cast<uintptr_t>(m_baseAddress);
+    uintptr_t end = reinterpret_cast<uintptr_t>(m_endAddress);
+    uintptr_t expected = begin;
+    SBlock *previous = NULL;
+    for (SBlock *b = m_first; b; b = b->next) {
+        uintptr_t at = reinterpret_cast<uintptr_t>(b);
+        // Check addresses before dereferencing potentially damaged metadata.
+        if (at != expected || (at & 31) || at < begin || at >= end || end-at < sizeof(SBlock))
+            return false;
+        if (b->prev != previous || b->s > (end-at)/sizeof(SBlock)-1)
+            return false;
+        expected = at + (uintptr_t(b->s)+1)*sizeof(SBlock);
+        previous = b;
+    }
+    return true;
+}
+#endif

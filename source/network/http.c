@@ -1,4 +1,8 @@
+#include "Diagnostics/Probes.h"
 #include "http.h"
+#include "TransferSocket.h"
+#include <ctype.h>
+#include <fcntl.h>
 
 /**
  * Emptyblock is a statically defined variable for functions to return if they are unable
@@ -11,12 +15,15 @@ const struct block emptyblock = {0, NULL};
 
 // Write our message to the server
 static s32 send_message(s32 server, char *msg) {
+	WX_PROBE(NETWORK, 1, 1);
+	WX_PROBE(NETWORK, 3, strlen(msg));
 	s32 bytes_transferred = 0;
 	s32 remaining = strlen(msg);
 	while (remaining) {
-		if ((bytes_transferred = net_write(server, msg, remaining > NET_BUFFER_SIZE ? NET_BUFFER_SIZE : remaining)) > 0) {
+		if ((bytes_transferred = wx_transfer_write(server, msg, remaining > NET_BUFFER_SIZE ? NET_BUFFER_SIZE : remaining)) > 0) {
+			WX_PROBE(NETWORK, 2, bytes_transferred);
 			remaining -= bytes_transferred;
-			usleep (20 * 1000);
+			msg += bytes_transferred;
 		} else if (bytes_transferred < 0) {
 			return bytes_transferred;
 		} else {
@@ -45,10 +52,19 @@ static s32 server_connect(u32 ipaddress, u32 socket_port) {
 	connect_addr.sin_addr.s_addr= ipaddress;
 
 	//Attemt to open the socket
-	if (net_connect(connection, (struct sockaddr*)&connect_addr, sizeof(connect_addr)) == -1) {
-		net_close(connection);
-		return -1;
-	}
+	s32 flags = net_fcntl(connection, F_GETFL, 0);
+    if (flags < 0 || net_fcntl(connection, F_SETFL, flags | 4) < 0) {
+        net_close(connection); return -1;
+    }
+    u64 deadline = wx_transfer_deadline(10);
+    for (;;) {
+        s32 result = net_connect(connection, (struct sockaddr*)&connect_addr, sizeof(connect_addr));
+        if (result >= 0 || result == -EISCONN) break;
+        if ((result != -EINPROGRESS && result != -EALREADY && result != -EAGAIN) ||
+            wx_transfer_expired(deadline)) { net_close(connection); return -1; }
+        struct pollsd p = {connection, 0x0008, 0};
+        if (net_poll(&p, 1, 100) < 0) usleep(1000);
+    }
 	return connection;
 }
 
@@ -80,17 +96,19 @@ struct block read_message(s32 connection)
 
 	//The offset variable always points to the first byte of memory that is free in the buffer
 	u32 offset = 0;
+	u64 deadline = wx_transfer_deadline(60);
 
 	while(1)
 	{
+		if (wx_transfer_expired(deadline)) { free(buffer.data); return emptyblock; }
 		//Fill the buffer with a new batch of bytes from the connection,
 		//starting from where we left of in the buffer till the end of the buffer
-		s32 bytes_read = net_read(connection, buffer.data + offset, buffer.size - offset);
+		s32 bytes_read = wx_transfer_read(connection, buffer.data + offset, buffer.size - offset);
 
 		//Anything below 0 is an error in the connection
 		if(bytes_read < 0)
 		{
-			//printf("Connection error from net_read()  Errorcode: %i\n", bytes_read);
+			free(buffer.data);
 			return emptyblock;
 		}
 
@@ -107,13 +125,17 @@ struct block read_message(s32 connection)
 		//if not expand it with an additional HTTP_BUFFER_GROWTH worth of bytes
 		if(offset >= buffer.size)
 		{
-			buffer.size += HTTP_BUFFER_GROWTH;
-			buffer.data = realloc(buffer.data, buffer.size);
-
-			if(buffer.data == NULL)
+			if (buffer.size >= 4*1024*1024) { free(buffer.data); return emptyblock; }
+			u32 capacity = buffer.size * 2;
+			if (capacity > 4*1024*1024) capacity = 4*1024*1024;
+			unsigned char *grown = realloc(buffer.data, capacity);
+			if(grown == NULL)
 			{
+				free(buffer.data);
 				return emptyblock;
 			}
+			buffer.data = grown;
+			buffer.size = capacity;
 		}
 	}
 
@@ -121,7 +143,13 @@ struct block read_message(s32 connection)
 	buffer.size = offset;
 
 	//Shrink the size of the buffer so the data fits exactly in it
-	buffer.data = realloc(buffer.data, buffer.size);
+	if(buffer.size == 0) {
+		free(buffer.data);
+		return emptyblock;
+	}
+	unsigned char *shrunk = realloc(buffer.data, buffer.size);
+	if(shrunk)
+		buffer.data = shrunk;
 
 	return buffer;
 }
@@ -133,7 +161,7 @@ struct block read_message(s32 connection)
 struct block downloadfile(const char *url)
 {
 	//Check if the url starts with "http://", if not it is not considered a valid url
-	if(strncmp(url, "http://", strlen("http://")) != 0)
+	if(!url || strlen(url) > 2048 || strpbrk(url, "\r\n") || strncmp(url, "http://", strlen("http://")) != 0)
 	{
 		//printf("URL '%s' doesn't start with 'http://'\n", url);
 		return emptyblock;
@@ -152,7 +180,7 @@ struct block downloadfile(const char *url)
 	//Extract the domain part out of the url
 	int domainlength = path - url - strlen("http://");
 
-	if(domainlength == 0)
+	if(domainlength <= 0 || domainlength > 253)
 	{
 		//printf("No domain part in URL '%s'\n", url);
 		return emptyblock;
@@ -185,52 +213,20 @@ struct block downloadfile(const char *url)
 	sprintf(header, headerformat, path, domain, domain);
 
 	//Do the request and get the response
-	send_message(connection, header);
-	struct block response = read_message(connection);
-	net_close(connection);
-
-	//Search for the 4-character sequence \r\n\r\n in the response which signals the start of the http payload (file)
-	unsigned char *filestart = NULL;
-	u32 filesize = 0;
-	unsigned int i;
-	for(i = 3; i < response.size; i++)
-	{
-		if(response.data[i] == '\n' &&
-			response.data[i-1] == '\r' &&
-			response.data[i-2] == '\n' &&
-			response.data[i-3] == '\r')
-		{
-			filestart = response.data + i + 1;
-			filesize = response.size - i - 1;
-			break;
-		}
-	}
-
-	if(filestart == NULL)
-	{
-		//printf("HTTP Response was without a file\n");
-		free(response.data);
-		return emptyblock;
-	}
-
-	//Copy the file part of the response into a new memoryblock to return
-	struct block file;
-	file.data = malloc(filesize);
-	file.size = filesize;
-
-	if(file.data == NULL)
-	{
-		//printf("No more memory to copy file from HTTP response\n");
-		free(response.data);
-		return emptyblock;
-	}
-
-	memcpy(file.data, filestart, filesize);
-
-	//Dispose of the original response
-	free(response.data);
-
-	return file;
+    struct http_reader reader;
+    int length = network_request(&reader, connection, header, NULL);
+    if (length <= 0 || length > 4*1024*1024) { net_close(connection); return emptyblock; }
+    struct block file = {(u32)length, malloc(length)};
+    if (!file.data) { net_close(connection); return emptyblock; }
+    u32 done = 0;
+    while (done < file.size) {
+        s32 got = http_read(&reader, file.data+done, file.size-done);
+        if (got <= 0) break;
+        done += got;
+    }
+    net_close(connection);
+    if (done != file.size) { free(file.data); return emptyblock; }
+    return file;
 }
 
 s32 GetConnection(char * domain)
@@ -246,50 +242,72 @@ s32 GetConnection(char * domain)
 
 }
 
-int network_request(int connection, const char * request, char * filename)
+int network_request(struct http_reader *reader, int connection, const char *request, char *filename)
 {
-	char buf[1024];
-	char *ptr = NULL;
+    char *buf = (char *)reader->pending;
+    memset(reader, 0, sizeof(*reader));
+    reader->connection = connection;
+    reader->deadline = wx_transfer_deadline(3600);
+    if (filename) filename[0] = 0;
+    if (send_message(connection, (char *)request) < 0) return -1;
+    u64 header_deadline = wx_transfer_deadline(10);
+    char *end;
+    for (;;) {
+        if (wx_transfer_expired(header_deadline) || reader->count >= sizeof(reader->pending)-1) return -1;
+        s32 got = wx_transfer_read(connection, buf+reader->count, sizeof(reader->pending)-1-reader->count);
+        if (got <= 0) return -1;
+        reader->count += got;
+        buf[reader->count] = 0;
+        if ((end = strstr(buf, "\r\n\r\n"))) break;
+    }
+    reader->offset = end+4-buf;
+    char saved = buf[reader->offset];
+    buf[reader->offset] = 0;
+    if (strncmp(buf, "HTTP/1.1 200 ", 13) && strncmp(buf, "HTTP/1.0 200 ", 13)) return -1;
+    long length = -1;
+    for (char *line = strstr(buf, "\r\n"); line && line[2]; line = strstr(line+2, "\r\n")) {
+        line += 2;
+        if (!strncasecmp(line, "Content-Length:", 15)) {
+            char *p = line+15, *tail;
+            while (*p == ' ' || *p == '\t') ++p;
+            if (!isdigit((unsigned char)*p) || length >= 0) return -1;
+            errno = 0;
+            unsigned long parsed = strtoul(p, &tail, 10);
+            while (*tail == ' ' || *tail == '\t') ++tail;
+            if (errno || parsed > 0x7fffffffUL || strncmp(tail, "\r\n", 2)) return -1;
+            length = parsed;
+        }
+        if (!strncasecmp(line, "Transfer-Encoding:", 18)) return -1;
+    }
+    if (length < 0) return -1;
+    char *name = strstr(buf, "filename=\"");
+    if (filename && name) {
+        name += 10;
+        unsigned n = 0;
+        while (name[n] && name[n] != '"') {
+            unsigned char c = name[n];
+            if (n >= 254 || c < 32 || c == 127 || c == '/' || c == '\\' || c == ':') return -1;
+            filename[n] = c; ++n;
+        }
+        if (name[n] != '"' || !n) return -1;
+        filename[n] = 0;
+        if (!strcmp(filename, ".") || !strcmp(filename, "..")) return -1;
+    }
+    buf[reader->offset] = saved;
+    return length;
+}
 
-	u32 cnt, size;
-	s32 ret;
-
-	ret = net_send(connection, request, strlen(request), 0);
-	if (ret < 0)
-		return ret;
-
-	memset(buf, 0, sizeof(buf));
-
-	for (cnt = 0; !strstr(buf, "\r\n\r\n"); cnt++)
-		if (net_recv(connection, buf + cnt, 1, 0) <= 0)
-			return -1;
-
-	if (!strstr(buf, "HTTP/1.1 200 OK"))
-		return -1;
-
-	if(filename)
-	{
-		/* Get filename */
-		ptr = strstr(buf, "filename=\"");
-
-		if(ptr)
-		{
-			ptr += sizeof("filename=\"")-1;
-
-			for(cnt = 0; ptr[cnt] != '\r' && ptr[cnt] != '\n' && ptr[cnt] != '"'; cnt++)
-			{
-				filename[cnt] = ptr[cnt];
-				filename[cnt+1] = '\0';
-			}
-		}
-	}
-
-	ptr = strstr(buf, "Content-Length:");
-	if (!ptr)
-		return -1;
-
-	sscanf(ptr, "Content-Length: %u", &size);
-	return size;
+int http_read(struct http_reader *reader, u8 *buf, u32 len)
+{
+    if (wx_transfer_expired(reader->deadline)) return -ETIMEDOUT;
+    u32 available = reader->count-reader->offset;
+    if (available) {
+        u32 n = available < len ? available : len;
+        memcpy(buf, reader->pending+reader->offset, n);
+        reader->offset += n;
+        return n;
+    }
+    return wx_transfer_read(reader->connection, buf, len);
 }
 
 int network_read(int connection, u8 *buf, u32 len)
@@ -299,7 +317,7 @@ int network_read(int connection, u8 *buf, u32 len)
 
 	while (read < len)
 	{
-		ret = net_read(connection, buf + read, len - read);
+		ret = wx_transfer_read(connection, buf + read, len - read);
 		if (ret < 0)
 			return ret;
 

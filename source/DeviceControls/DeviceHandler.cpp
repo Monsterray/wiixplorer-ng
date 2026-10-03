@@ -1,3 +1,4 @@
+#include "Diagnostics/Probes.h"
 /****************************************************************************
  * Copyright (C) 2011
  * by Dimok
@@ -84,7 +85,7 @@ void DeviceHandler::UnMountAll()
 	if(gca)
 		delete gca;
 	if(gcb)
-		delete gca;
+		delete gcb;
 	if(usb0)
 		delete usb0;
 	if(usb1)
@@ -133,13 +134,13 @@ bool DeviceHandler::Mount(int dev)
 bool DeviceHandler::IsInserted(int dev)
 {
 	if(dev == SD)
-		return SD_Inserted() && sd->IsMounted(0);
+		return sd && SD_Inserted() && sd->IsMounted(0);
 
 	else if(dev == GCSDA)
-		return GCA_Inserted() && gca->IsMounted(0);
+		return gca && GCA_Inserted() && gca->IsMounted(0);
 
 	else if(dev == GCSDB)
-		return GCB_Inserted() && gcb->IsMounted(0);
+		return gcb && GCB_Inserted() && gcb->IsMounted(0);
 
 	else if(dev >= USB1 && dev <= USB8)
 		return GetUSBFromDev(dev) && GetUSBFromDev(dev)->IsMounted(PartToPortPart(dev-USB1));
@@ -183,7 +184,7 @@ void DeviceHandler::UnMount(int dev)
 		CloseFTP(dev-FTP1);
 
 	else if(dev >= NFS1 && dev <= NFS10)
-		CloseNFS(dev-FTP1);
+		CloseNFS(dev-NFS1);
 
 	else if(dev == NAND)
 		UnMountNAND();
@@ -194,6 +195,8 @@ void DeviceHandler::UnMount(int dev)
 
 bool DeviceHandler::MountSD()
 {
+	WX_SCOPE(IO);
+	WX_PROBE(IO, 1, 1);
 	if(!sd)
 		sd = new PartitionHandle(&__io_wiisd);
 
@@ -303,10 +306,11 @@ bool DeviceHandler::MountUSB(int pos)
 	if(usb1)
 		partCount += usb1->GetPartitionCount();
 
-	if(pos >= partCount)
+	if(pos < 0 || pos >= partCount || pos > USB8-USB1)
 		return false;
 
-	return GetUSBFromDev(USB1+pos)->Mount(PartToPortPart(pos), DeviceName[USB1+pos]);
+	PartitionHandle *handle = GetUSBFromDev(USB1+pos);
+	return handle && handle->Mount(PartToPortPart(pos), DeviceName[USB1+pos]);
 }
 
 bool DeviceHandler::MountAllUSB()
@@ -326,7 +330,7 @@ bool DeviceHandler::MountAllUSB()
 	if(usb1)
 		partCount += usb1->GetPartitionCount();
 
-	for(int i = 0; i < partCount; i++)
+	for(int i = 0; i < partCount && i <= USB8-USB1; i++)
 	{
 		if(MountUSB(i))
 			result = true;
@@ -445,6 +449,8 @@ int DeviceHandler::PathToDriveType(const char * path)
 
 const char * DeviceHandler::GetFSName(int dev)
 {
+	if(!instance)
+		return NULL;
 	if(dev == SD && DeviceHandler::instance->sd)
 	{
 		return DeviceHandler::instance->sd->GetFSName(0);
@@ -467,6 +473,8 @@ const char * DeviceHandler::GetFSName(int dev)
 
 PartitionHandle * DeviceHandler::GetUSBFromDev(int dev)
 {
+	if(dev < USB1 || dev > USB8)
+		return NULL;
 	int usbPart = dev-USB1;
 
 	if(!usb0 || usbPart >= usb0->GetPartitionCount())
@@ -478,7 +486,7 @@ PartitionHandle * DeviceHandler::GetUSBFromDev(int dev)
  int DeviceHandler::PartToPortPart(int part)
  {
 	if(!usb0 || part >= usb0->GetPartitionCount())
-		return part-usb0->GetPartitionCount();
+		return part-(usb0 ? usb0->GetPartitionCount() : 0);
 	else
 		return part;
  }

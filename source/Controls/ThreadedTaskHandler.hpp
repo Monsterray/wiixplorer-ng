@@ -19,6 +19,9 @@
 
 #include <gccore.h>
 #include <queue>
+#include <atomic>
+#include <ogc/semaphore.h>
+#include "CMutex.h"
 #include "CThread.h"
 
 class ThreadedTask
@@ -35,11 +38,9 @@ public:
 	static ThreadedTaskHandler * Instance() { if(!instance) instance = new ThreadedTaskHandler(); return instance; };
 	static void DestroyInstance() { delete instance; instance = NULL; };
 
-	void AddTask(ThreadedTask *Task)
-	{
-		TaskList.push(Task);
-		resumeThread();
-	}
+	// Tasks remain owned by the caller (some callers queue stack objects).
+	void AddTask(ThreadedTask *Task);
+
 private:
 	ThreadedTaskHandler();
 	virtual ~ThreadedTaskHandler();
@@ -47,7 +48,9 @@ private:
 	void executeThread(void);
 
 	static ThreadedTaskHandler *instance;
-	bool ExitRequested;
+	std::atomic_bool ExitRequested;
+	sem_t wake;
+	CMutex queueMutex;
 	std::queue<ThreadedTask *> TaskList;
 };
 

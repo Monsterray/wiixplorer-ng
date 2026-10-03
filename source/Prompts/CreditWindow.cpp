@@ -27,7 +27,7 @@
  ***************************************************************************/
 #include "Controls/Application.h"
 #include "CreditWindow.h"
-#include "svnrev.h"
+#include "gitrev.h"
 
 
 CreditWindow::CreditWindow(GuiFrame *p)
@@ -145,7 +145,7 @@ CreditWindow::CreditWindow(GuiFrame *p)
 	Backbtn->Clicked.connect(this, &CreditWindow::OnButtonClick);
 
 	char Rev[50];
-	sprintf(Rev, "Rev. %i", atoi(SvnRev()));
+	snprintf(Rev, sizeof(Rev), "NG %s", BuildRev());
 
 	RevNum = new GuiText(Rev, 22, (GXColor) {0, 0, 0, 255});
 	RevNum->SetAlignment(ALIGN_LEFT | ALIGN_TOP);

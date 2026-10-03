@@ -528,7 +528,7 @@ bool ArchiveBrowser::FileSortCallback(const ArchiveFileStruct * f1, const Archiv
 	if(f1->isdir && !(f2->isdir)) return true;
 	if(!(f1->isdir) && f2->isdir) return false;
 
-	if(stricmp(f1->filename, f2->filename) > 0)
+	if(strcasecmp(f1->filename, f2->filename) > 0)
 		return false;
 	else
 		return true;

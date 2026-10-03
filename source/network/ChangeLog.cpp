@@ -20,7 +20,6 @@
 #include "FileOperations/fileops.h"
 #include "TextOperations/TextEditor.h"
 #include "ChangeLog.h"
-#include "svnrev.h"
 
 ChangeLog::ChangeLog()
 {
@@ -224,11 +223,6 @@ bool ChangeLog::Show()
 
 	changelogPath += "ChangeLog.txt";
 
-	if(GetSavedChangeLogRev() < atoi(SvnRev()))
-	{
-		if(!DownloadChangeLog(atoi(SvnRev())-5, atoi(SvnRev())))
-			return false;
-	}
 
 	if(!CheckFile(changelogPath.c_str()))
 		return false;

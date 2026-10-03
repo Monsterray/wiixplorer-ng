@@ -333,7 +333,7 @@ void Channels::Sort()
 
 bool Channels::FileSortCallback(const Channel & f1, const Channel & f2)
 {
-	if(stricmp(f1.name, f2.name) > 0)
+	if(strcasecmp(f1.name, f2.name) > 0)
 		return false;
 	else
 		return true;

@@ -17,7 +17,6 @@
 #include "LanguageSettingsMenu.h"
 #include "Controls/Taskbar.h"
 #include "Prompts/PromptWindows.h"
-#include "network/UpdateTask.h"
 #include "Settings.h"
 
 LanguageSettingsMenu::LanguageSettingsMenu(GuiFrame *r)
@@ -104,15 +103,7 @@ void LanguageSettingsMenu::SetupOptions()
 
 void LanguageSettingsMenu::OnDownloadButtonClick(GuiButton *sender UNUSED, int pointer UNUSED, const POINT &p UNUSED)
 {
-	int choice = WindowPrompt(0, tr("Do you want to download new language files?"), tr("Yes"), tr("Cancel"));
-	if(choice)
-	{
-		UpdateTask *task = new UpdateTask(false, true, false);
-		task->SetAutoDelete(true);
-		task->TaskEnd.connect(this, &LanguageSettingsMenu::OnUpdateFinish);
-		Taskbar::Instance()->AddTask(task);
-		ThreadedTaskHandler::Instance()->AddTask(task);
-	}
+	ThrowMsg(tr("Updates disabled"), tr("The legacy update service is no longer supported. Install updates manually."));
 }
 
 void LanguageSettingsMenu::OnResetButtonClick(GuiButton *sender UNUSED, int pointer UNUSED, const POINT &p UNUSED)

@@ -72,6 +72,7 @@ ExternalKeyboard::~ExternalKeyboard()
 {
 	bExitRequested = true;
 	bSuspendScan = false;
+	shutdownThread();
 
 	USBKeyboard_Close();
 	USBKeyboard_Deinitialize();

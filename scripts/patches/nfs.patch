@@ -1,0 +1,362 @@
+--- a/source/nfs_file.h
++++ b/source/nfs_file.h
+@@ -36,10 +36,10 @@
+ #define CREATE_EXCLUSIVE	2
+ 
+ int32_t _NFS_open_r (struct _reent *r, void *fileStruct, const char *path, int32_t flags, int32_t mode);
+-int32_t _NFS_close_r (struct _reent *r, int32_t fd);
+-ssize_t _NFS_write_r (struct _reent *r,int32_t fd, const char *ptr, size_t len);
+-ssize_t _NFS_read_r (struct _reent *r, int32_t fd, char *ptr, size_t len);
+-off_t _NFS_seek_r (struct _reent *r, int32_t fd, off_t pos, int32_t dir);
++int32_t _NFS_close_r (struct _reent *r, void *fd);
++ssize_t _NFS_write_r (struct _reent *r,void *fd, const char *ptr, size_t len);
++ssize_t _NFS_read_r (struct _reent *r, void *fd, char *ptr, size_t len);
++off_t _NFS_seek_r (struct _reent *r, void *fd, off_t pos, int32_t dir);
+ int32_t _NFS_stat_r (struct _reent *r, const char *path, struct stat *st);
+ //int32_t _NFS_link_r (struct _reent *r, const char *existing, const char *newLink);
+ int32_t _NFS_unlink_r (struct _reent *r, const char *name);
+--- a/source/nfs_file.c
++++ b/source/nfs_file.c
+@@ -98,8 +98,8 @@
+ 	// O_RDONLY -> only allow read, block write calls
+ 	// O_WRONLY -> only allow write, block read
+ 	// O_RDWR -> allow both read and write
+-	file->read = ((mode & O_RDONLY) | (mode & O_RDWR)) != 0 ? 1 :0;
+-	file->write = ((mode & O_WRONLY) | (mode & O_RDWR)) != 0 ? 1 :0;
++	file->read = (flags & O_ACCMODE) != O_WRONLY;
++	file->write = (flags & O_ACCMODE) != O_RDONLY;
+ 	file->append = (flags & O_CREAT) == O_CREAT && (flags & O_TRUNC) == 0; 
+ 
+ 	fhandle3 baseDir = {0};
+@@ -118,6 +118,7 @@
+ 	r->_errno = _NFS_do_lookup(file->nfsmount, &baseDir, filename, &attr, &file->handle);
+ 	if (r->_errno != 0) {
+ 		if (r->_errno != NFS3ERR_NOENT) {
++			_NFS_unlock(&nfsmount->lock);
+ 			return -1;
+ 		}
+ 		r->_errno = exists = 0;
+@@ -130,7 +131,8 @@
+ 			r->_errno = EEXIST;
+ 			return -1;
+ 		}
+-		file->size = (int32_t) attr.st_size;
++        if (attr.st_size < 0 || (uint64_t)attr.st_size > 0xffffffffULL) { r->_errno = EFBIG; _NFS_unlock(&nfsmount->lock); return -1; }
++		file->size = (uint32_t) attr.st_size;
+ 		file->currentPosition = ((flags & O_APPEND) == O_APPEND) ? file->size : 0;
+ 		if ((flags & O_TRUNC) == 0) { // If we need truncation, we need a create call
+ 			_NFS_unlock(&file->nfsmount->lock);
+@@ -218,9 +220,11 @@
+ 	return r->_errno == 0 ? 0 : -1;
+ }
+ 
+-int32_t _NFS_close_r (struct _reent *r, int32_t fd)
++int32_t _NFS_close_r (struct _reent *r, void *fd)
+ {
+ 	NFS_FILE_STRUCT *file = (NFS_FILE_STRUCT *) fd;
++    if (!file || !file->nfsmount) { r->_errno = EBADF; return -1; }
++    mutex_t lock = file->nfsmount->lock;
+ 
+ 	_NFS_lock(&file->nfsmount->lock);
+ 
+@@ -235,6 +239,7 @@
+ 		offset += rpc_write_int(file->nfsmount, offset, 0);
+ 
+ 		int32_t ret = udp_sendrecv(file->nfsmount, offset, file->nfsmount->nfs_port);
++		int32_t response_size = ret;
+ 		if (ret < 0) {
+ 			_NFS_unlock(&file->nfsmount->lock);
+ 			return ret;
+@@ -248,38 +253,54 @@
+ 		}
+ 
+ 		int intVal;
+-		rpc_read_int(file->nfsmount, offset, &intVal);
++		if (response_size < rpc_header_length+4) { r->_errno = EIO; _NFS_unlock(&file->nfsmount->lock); return -1; }
++		rpc_read_int(file->nfsmount, rpc_header_length, &intVal);
+ 		if (intVal != 0) {
+-			_NFS_unlock(&file->nfsmount->lock);
+-			return intVal;
+-		}
+-	}
+-	mutex_t lock = file->nfsmount->lock;
++            r->_errno = intVal; _NFS_unlock(&file->nfsmount->lock); return -1;
++        }
++        offset = rpc_header_length+4;
++        if (offset+4 > (uint32_t)response_size) goto close_bad_reply;
++        offset += rpc_read_int(file->nfsmount, offset, &intVal);
++        if (intVal) offset += 24;
++        if (offset+4 > (uint32_t)response_size) goto close_bad_reply;
++        offset += rpc_read_int(file->nfsmount, offset, &intVal);
++        if (intVal) offset += sizeof(object_attributes);
++        if (offset+8 > (uint32_t)response_size) goto close_bad_reply;
++        int64_t committedVerifier;
++        rpc_read_long(file->nfsmount, offset, &committedVerifier);
++        if (file->hasWriteVerifier && committedVerifier != file->writeVerifier) goto close_bad_reply;
++	}
+ 
+ 	memset(file, 0, sizeof(NFS_FILE_STRUCT));
+ 	_NFS_unlock(&lock);
+ 
+ 	return 0;
+-}
+-
+-ssize_t _NFS_write_r (struct _reent *r, int32_t fd, const char *ptr, size_t len)
++close_bad_reply:
++    r->_errno = EIO; _NFS_unlock(&file->nfsmount->lock); return -1;
++}
++
++ssize_t _NFS_write_r (struct _reent *r, void *fd, const char *ptr, size_t len)
+ {
+ 	NFS_FILE_STRUCT *file = (NFS_FILE_STRUCT *) fd;
+ 
+-	if (file == NULL || !file->write) {
++	if (file == NULL || !file->nfsmount || !file->write) {
+ 		r->_errno = EBADF;
+ 		return -1;
+ 	}
+ 
++    if (!len) return 0;
++    if (len > 0x7fffffffUL || (uint64_t)file->currentPosition + len > 0xffffffffULL || file->handle.len < 0 || file->handle.len > 64) { r->_errno = EFBIG; return -1; }
+ 	_NFS_lock(&file->nfsmount->lock);
+ 	file->shouldcommit = 1;
+ 
+ 	int32_t block_len = file->nfsmount->wtpref;
+-	// Calculate the best block_len, as specified by the server
+-	if (block_len > file->nfsmount->bufferlen) block_len = ((file->nfsmount->bufferlen - 1)/file->nfsmount->wtmult) * file->nfsmount->wtmult;
++    if (block_len > 3840) block_len = 3840;
++    if (file->nfsmount->bufferlen <= 256 || block_len <= 0) {
++        r->_errno = EIO; _NFS_unlock(&file->nfsmount->lock); return -1;
++    }
++    if ((uint32_t)block_len > file->nfsmount->bufferlen-256) block_len = file->nfsmount->bufferlen-256;
+ 
+ 	int32_t amount_of_data_written = 0;
+-	int64_t verifier = 0;
+ 	do
+ 	{
+ 		// Amount of data to read
+@@ -292,16 +313,12 @@
+ 		offset += rpc_write_fhandle(file->nfsmount, offset, &file->handle);
+ 		offset += rpc_write_long(file->nfsmount, offset, file->currentPosition);
+ 
+-		#if defined (__wii__)
+-		current_block = 4096 - (offset + 12); // I'll have to write less bytes (12 for the other header bytes, which we still have to write), max 4096
+-		if (len - amount_of_data_written < current_block) current_block = len - amount_of_data_written;
+-		#endif
+-
+ 		offset += rpc_write_int(file->nfsmount, offset, current_block);
+ 		offset += rpc_write_int(file->nfsmount, offset, WRITE_UNSTABLE);		
+-		offset += rpc_write_block(file->nfsmount, offset, (void *) ptr + amount_of_data_written, current_block);
++		offset += rpc_write_block(file->nfsmount, offset, (void *)(ptr + amount_of_data_written), current_block);
+ 
+ 		int32_t ret = udp_sendrecv(file->nfsmount, offset, file->nfsmount->nfs_port);
++		int32_t response_size = ret;
+ 		if (ret < 0) {
+ 			_NFS_unlock(&file->nfsmount->lock);
+ 			return ret;
+@@ -315,57 +332,71 @@
+ 		}
+ 
+ 		int32_t intVal, count;
+-		offset = rpc_header_length;
++        if (rpc_header_length < 0 || response_size < rpc_header_length+4 ||
++            (uint32_t)response_size > file->nfsmount->bufferlen) {
++            r->_errno = EIO; _NFS_unlock(&file->nfsmount->lock); return -1;
++        }
++        offset = rpc_header_length;
+ 		offset += rpc_read_int(file->nfsmount, offset, &intVal);
+ 		if (intVal != 0) {
+ 			r->_errno = intVal;
++			_NFS_unlock(&file->nfsmount->lock);
+ 			return -1;
+ 		}
+ 
+-		// We will receive the weak cache consistency first, ignore it
+-		offset += rpc_read_int(file->nfsmount, offset, &intVal);
+-		if (intVal) offset += sizeof(object_attributes); // skip "before" object attributes
+-		offset += rpc_read_int(file->nfsmount, offset, &intVal);
+-		if (intVal) offset += sizeof(object_attributes); // skip "after" object attributes
++        // WCC fields are optional; validate before reading/skipping them.
++        if (offset+4 > (uint32_t)response_size) goto write_bad_reply;
++        offset += rpc_read_int(file->nfsmount, offset, &intVal);
++        if (intVal) offset += 24;
++        if (offset+4 > (uint32_t)response_size) goto write_bad_reply;
++        offset += rpc_read_int(file->nfsmount, offset, &intVal);
++        if (intVal) offset += sizeof(object_attributes);
++        if (offset+16 > (uint32_t)response_size) goto write_bad_reply;
+ 
+ 		offset += rpc_read_int(file->nfsmount, offset, &count);
+ 		offset += rpc_read_int(file->nfsmount, offset, &intVal); // Committed, which may be everything, since we use UNSAFE write (it must be intVal >= WRITE_MODE)
+ 
+ 		int64_t newVerifier;
+ 		offset += rpc_read_long(file->nfsmount, offset, &newVerifier);
+-		if (verifier == 0) verifier = newVerifier;
+-		else if (verifier != newVerifier) { // Server state changed between calls, that cannot be allowed!
++		if (!file->hasWriteVerifier) { file->writeVerifier = newVerifier; file->hasWriteVerifier = 1; }
++		else if (file->writeVerifier != newVerifier) { // Server state changed between calls, that cannot be allowed!
+ 			r->_errno=EIO;
++			_NFS_unlock(&file->nfsmount->lock);
+ 			return -1;
+ 		}
+ 
+-		amount_of_data_written += count;
++		if (count <= 0 || count > current_block || offset > (uint32_t)response_size) {
++            r->_errno = EIO; _NFS_unlock(&file->nfsmount->lock); return -1;
++        }
++        amount_of_data_written += count;
+ 		file->currentPosition += count;
+ 
+-		if (intVal) {
+-			break;
+-		}
++        if (file->currentPosition > file->size) file->size = file->currentPosition;
+ 	} while (amount_of_data_written < len);
+ 
+ 	_NFS_unlock(&file->nfsmount->lock);
+ 
+ 	return amount_of_data_written;
+-}
+-
+-ssize_t _NFS_read_r (struct _reent *r, int32_t fd, char *ptr, size_t len)
++write_bad_reply:
++    r->_errno = EIO; _NFS_unlock(&file->nfsmount->lock); return -1;
++}
++
++ssize_t _NFS_read_r (struct _reent *r, void *fd, char *ptr, size_t len)
+ {
+ 	// We don't cache reads, since it'll cost more memory, just don't do random reads :)
+ 	NFS_FILE_STRUCT *file = (NFS_FILE_STRUCT *) fd;
+-	_NFS_lock(&file->nfsmount->lock);
++    if (!file || !file->nfsmount || !file->read) { r->_errno = EBADF; return -1; }
++    if (!len) return 0;
++    if (len > 0x7fffffffUL || (uint64_t)file->currentPosition + len > 0xffffffffULL || file->handle.len < 0 || file->handle.len > 64) { r->_errno = EFBIG; return -1; }
++    _NFS_lock(&file->nfsmount->lock);
+ 
+ 	int32_t block_len = file->nfsmount->rtpref;
+ 	// Calculate the best block_len, as specified by the server
+-	if (block_len > file->nfsmount->bufferlen) block_len = ((file->nfsmount->bufferlen - 1)/file->nfsmount->rtmult) * file->nfsmount->rtmult;
+-
+-	#if defined (__wii__)
+-	// Fake a block_len for now
+-	block_len =	8192 - 128; // This works for the wii, but 8192 bytes seems to be the max message size which is retrieved (128 is the max header for a READ reply)
+-	#endif
++	if (block_len > 8064) block_len = 8064;
++    if (file->nfsmount->bufferlen <= 128 || block_len <= 0) {
++        r->_errno = EIO; _NFS_unlock(&file->nfsmount->lock); return -1;
++    }
++    if ((uint32_t)block_len > file->nfsmount->bufferlen-128) block_len = file->nfsmount->bufferlen-128;
+ 
+ 	int64_t amount_of_data_read = 0;
+ 	do
+@@ -382,6 +413,7 @@
+ 		offset += rpc_write_int(file->nfsmount, offset, current_block);
+ 
+ 		int32_t ret = udp_sendrecv(file->nfsmount, offset, file->nfsmount->nfs_port);
++		int32_t response_size = ret;
+ 		if (ret < 0) {
+ 			_NFS_unlock(&file->nfsmount->lock);
+ 			return ret;
+@@ -395,23 +427,36 @@
+ 		}
+ 
+ 		int32_t intVal, count;
+-		offset = rpc_header_length;
++        if (rpc_header_length < 0 || response_size < rpc_header_length+4 ||
++            (uint32_t)response_size > file->nfsmount->bufferlen) {
++            r->_errno = EIO; _NFS_unlock(&file->nfsmount->lock); return -1;
++        }
++        offset = rpc_header_length;
+ 		offset += rpc_read_int(file->nfsmount, offset, &intVal);
+ 		if (intVal != 0) {
+ 			r->_errno = intVal;
++			_NFS_unlock(&file->nfsmount->lock);
+ 			return -1;
+ 		}
+ 
++        if (offset+4 > (uint32_t)response_size) goto read_bad_reply;
+ 		offset += rpc_read_int(file->nfsmount, offset, &intVal);
+ 		if (intVal) {
+ 			offset += sizeof(object_attributes); // Let's skip the attributes for now
+ 		}
++        if (offset+12 > (uint32_t)response_size) goto read_bad_reply;
+ 		offset += rpc_read_int(file->nfsmount, offset, &count);
+ 		offset += rpc_read_int(file->nfsmount, offset, &intVal); // EOF?
+ 
+ 		// First, copy all data
+-		offset += 4; // Again a count? Weird...
+-		memcpy(ptr + amount_of_data_read, file->nfsmount->buffer + offset, count);
++		int32_t opaque_count;
++        offset += rpc_read_int(file->nfsmount, offset, &opaque_count);
++        if (count < 0 || count > current_block || opaque_count != count ||
++            offset > (uint32_t)response_size || (uint32_t)count > (uint32_t)response_size-offset ||
++            (!count && !intVal)) {
++            r->_errno = EIO; _NFS_unlock(&file->nfsmount->lock); return -1;
++        }
++        memcpy(ptr + amount_of_data_read, (char *)file->nfsmount->buffer + offset, count);
+ 
+ 		amount_of_data_read += count;
+ 		file->currentPosition += count;
+@@ -424,11 +469,14 @@
+ 	_NFS_unlock(&file->nfsmount->lock);
+ 
+ 	return amount_of_data_read;
+-}
+-
+-off_t _NFS_seek_r (struct _reent *r, int32_t fd, off_t pos, int32_t dir)
++read_bad_reply:
++    r->_errno = EIO; _NFS_unlock(&file->nfsmount->lock); return -1;
++}
++
++off_t _NFS_seek_r (struct _reent *r, void *fd, off_t pos, int32_t dir)
+ {
+ 	NFS_FILE_STRUCT *file = (NFS_FILE_STRUCT *) fd;
++    if (!file || !file->nfsmount) { r->_errno = EBADF; return -1; }
+ 	if (file->isnew && dir == SEEK_END) {
+ 		r->_errno = EINVAL;
+ 		return -1;
+@@ -454,6 +502,7 @@
+ 			r->_errno = EINVAL;
+ 			return -1;
+ 	}
++    if (newPos < 0 || (uint64_t)newPos > 0xffffffffULL) { r->_errno = EFBIG; _NFS_unlock(&file->nfsmount->lock); return -1; }
+ 	file->currentPosition = (uint32_t) newPos;
+ 	_NFS_unlock(&file->nfsmount->lock);
+ 	return (off_t) file->currentPosition;
+--- a/source/nfs_net.c
++++ b/source/nfs_net.c
+@@ -118,7 +118,13 @@
+ 			if (ret >= 0)
+ 			{
+ 				// Is this the expected message?
+-				if (rpc_is_expected_message(nfsmount)) return ret;
++				if (ret >= 24 && (uint32_t)ret <= nfsmount->bufferlen && ((struct sockaddr_in *)&from)->sin_addr.s_addr == nfsmount->remote.sin_addr.s_addr &&
++                    ((struct sockaddr_in *)&from)->sin_port == nfsmount->remote.sin_port &&
++                    rpc_is_expected_message(nfsmount)) {
++                    // Do not let parsers observe stale bytes from the request.
++                    memset((char *)nfsmount->buffer+ret, 0, nfsmount->bufferlen-ret);
++                    return ret;
++                }
+ 
+ 				// Xid is invalid, drop this message
+ 			}
+--- a/source/rpc.c
++++ b/source/rpc.c
+@@ -98,6 +98,7 @@
+ 	// buf[0] -> contains sequenceId = xid
+ 	if (buf[1] != TYPE_REPLY) return -1;
+ 	if (buf[2] != SUCCESS) return -2;
++    if (buf[4] != 0 || buf[5] != SUCCESS) return -1;
+ 	// buf[3] -> contains verifier, which is NULL
+ 	// buf[4] -> contains verifier length, which will be 0
+ 
+--- a/source/structs.h
++++ b/source/structs.h
+@@ -141,6 +141,8 @@
+ 	int8_t write;
+ 	int8_t append;
+ 	int8_t shouldcommit;
++	int8_t hasWriteVerifier;
++	int64_t writeVerifier;
+ } NFS_FILE_STRUCT;
+ 
+ #endif //_STRUCTS_H_

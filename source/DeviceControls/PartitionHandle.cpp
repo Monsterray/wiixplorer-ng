@@ -69,6 +69,7 @@ static inline const char * PartFromType(int type)
 PartitionHandle::PartitionHandle(const DISC_INTERFACE *discio)
 {
 	interface = discio;
+	sectorSize = 512;
 
 	// Sanity check
 	if (!interface)
@@ -91,7 +92,8 @@ PartitionHandle::~PartitionHandle()
 	UnMountAll();
 
 	//shutdown device
-	interface->shutdown();
+	if(interface)
+		interface->shutdown();
 }
 
 bool PartitionHandle::IsMounted(int pos)
@@ -107,7 +109,7 @@ bool PartitionHandle::IsMounted(int pos)
 
 bool PartitionHandle::Mount(int pos, const char * name)
 {
-	if(!valid(pos))
+	if(!interface || !interface->isInserted() || !valid(pos))
 		return false;
 
 	if(!name)
@@ -157,7 +159,7 @@ void PartitionHandle::UnMount(int pos)
 	if(!interface)
 		return;
 
-	if(pos >= (int) MountNameList.size())
+	if(pos < 0 || pos >= (int) MountNameList.size())
 		return;
 
 	if(MountNameList[pos].size() == 0)
@@ -242,6 +244,19 @@ int PartitionHandle::FindPartitions()
 		free(mbr);
 		return -1;
 	}
+
+    // SD cards and Dolphin may contain a FAT volume directly at sector zero.
+    // Validate the BPB before treating boot code as an MBR partition table.
+    const u8 *b = reinterpret_cast<const u8 *>(mbr);
+    u32 total = b[19] | (u32(b[20]) << 8);
+    if (!total) total = b[32] | (u32(b[33]) << 8) | (u32(b[34]) << 16) | (u32(b[35]) << 24);
+    if ((memcmp(b+0x36, "FAT", 3) == 0 || memcmp(b+0x52, "FAT", 3) == 0) &&
+        (b[11] | (u32(b[12]) << 8)) == sectorSize && b[13] &&
+        !(b[13] & (b[13]-1)) && (b[14] || b[15]) && b[16] && total) {
+        AddPartition("FAT", 0, total, false, 0x0c, 0);
+        free(mbr);
+        return 0;
+    }
 
 	for (int i = 0; i < 4; i++)
 	{
@@ -333,6 +348,14 @@ int PartitionHandle::CheckGPT(int PartNum)
 	gpt_header->part_entry_size = le32(gpt_header->part_entry_size);
 	gpt_header->part_entry_checksum = le32(gpt_header->part_entry_checksum);
 
+	// Only accept entries that fit wholly within a sector.
+	if(gpt_header->part_entry_size < sizeof(GUID_PART_ENTRY) ||
+	   gpt_header->part_entry_size > sectorSize ||
+	   sectorSize % gpt_header->part_entry_size != 0) {
+		free(gpt_header);
+		return -1;
+	}
+
 	u8 * sector_buf = (u8 *) malloc(MAX_SECTOR_SIZE);
 	if(!sector_buf) {
 		free(gpt_header);
@@ -341,12 +364,12 @@ int PartitionHandle::CheckGPT(int PartNum)
 
 	u64 next_lba = gpt_header->part_table_lba;
 
-	for(u32 i = 0; i < gpt_header->part_entries; ++i)
+	for(u32 i = 0; i < gpt_header->part_entries;)
 	{
 		if (!interface->readSectors(next_lba, 1, sector_buf))
 			break;
 
-		for(u32 n = 0; n < sectorSize/gpt_header->part_entry_size; ++n, ++i)
+		for(u32 n = 0; n < sectorSize/gpt_header->part_entry_size && i < gpt_header->part_entries; ++n, ++i)
 		{
 			GUID_PART_ENTRY * part_entry = (GUID_PART_ENTRY *) (sector_buf+gpt_header->part_entry_size*n);
 
@@ -355,7 +378,12 @@ int PartitionHandle::CheckGPT(int PartNum)
 
 			bool bootable = (memcmp(part_entry->part_type_guid, TYPE_BIOS, 16) == 0);
 
-			AddPartition("GUID-Entry", le64(part_entry->part_first_lba), le64(part_entry->part_last_lba),
+			u64 first = le64(part_entry->part_first_lba);
+			u64 last = le64(part_entry->part_last_lba);
+			if(last < first || last - first == ~(u64)0)
+				continue;
+
+			AddPartition("GUID-Entry", first, last - first + 1,
 						 bootable, PARTITION_TYPE_GPT, PartNum);
 		}
 

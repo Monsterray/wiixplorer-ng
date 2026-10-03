@@ -1,3 +1,4 @@
+#include "network/TransferSocket.h"
 /****************************************************************************
  * TinyFTP
  * Nintendo Wii/GameCube FTP implementation
@@ -29,13 +30,14 @@
 //cache pages count
 #define FTP_CACHE_PAGES			  3
 //cache page size
-#define NET_READ_BUFFERSIZE			7300
-#define NET_WRITE_BUFFERSIZE			4096
+#define NET_READ_BUFFERSIZE			16384
+#define NET_WRITE_BUFFERSIZE			16384
 
 #define FTP_READ_BUFFERSIZE			(128*1024)
 
 #define FTP_MAXPATH					1024
-#define FTP_MAX_LINE				255
+#define FTP_MAX_LINE				512
+#define FTP_MAX_DIRECTORY_ENTRIES 4096
 
 
 #define IOS_O_NONBLOCK				0x04
@@ -44,6 +46,16 @@
 #define SOCKET s32
 
 //======================
+static int format_ftp_command(char *buffer, size_t capacity, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(buffer, capacity, format, args);
+    va_end(args);
+    if (n < 0 || (size_t)n >= capacity) { buffer[0] = 0; return -1; }
+    return n;
+}
+
 //======================
 //file structure
 typedef struct
@@ -52,6 +64,9 @@ typedef struct
 	off_t size;						//length of file
 	char filename[FTP_MAXPATH];		//full filename, "\doc\file.dat"
 	int envIndex;					//connection this file belongs too
+	int flags;
+	bool transferFailed;
+	bool wrote;
 } FTPFILESTRUCT;
 
 
@@ -74,7 +89,7 @@ typedef struct
 {
   off_t size;				//file size
   bool isDirectory;			//item is directory
-  char name[FTP_MAX_LINE];	//'file.dat', 'doc'
+  char name[256];	//'file.dat', 'doc'
 } FTPDIRENTRY;
 
 //======================
@@ -102,6 +117,7 @@ typedef struct
 
 	SOCKET ctrl_socket;
 	SOCKET data_socket;
+	FTPFILESTRUCT *write_file;
 
 	char * name;			 //'ftp1', NULL means free item
 	int envIndex;		   //position if this item in FTPEnv array
@@ -143,7 +159,7 @@ ftp_cache_page *FTPReadAheadCache = NULL;
 u32 numFTP_RA_pages = 0;
 
 //used to reuse data connections with RETR
-static char last_cmd[FTP_MAX_LINE] = "";
+static char last_cmd[FTP_MAXPATH + 6] = "";
 static off_t last_off = 0;
 
 static bool dir_changed = false;
@@ -295,7 +311,7 @@ static bool SocketSend(SOCKET theSocket, const char* buf, size_t count)
 	t1=ticks_to_millisecs(gettime());
 	while(count>0)
 	{
-		ret=net_send(theSocket,buf,(count>NET_WRITE_BUFFERSIZE)?NET_WRITE_BUFFERSIZE:count,0);
+		ret=wx_transfer_write(theSocket,buf,(count>NET_WRITE_BUFFERSIZE)?NET_WRITE_BUFFERSIZE:count);
 		if(ret==-EAGAIN)
 		{
 			t2=ticks_to_millisecs(gettime());
@@ -306,7 +322,7 @@ static bool SocketSend(SOCKET theSocket, const char* buf, size_t count)
 			usleep(100);	/* allow system to perform work. Stabilizes system */
 			continue;
 		}
-		else if(ret<0)
+		else if(ret<=0)
 		{
 			return false;	/* some error happened */
 		}
@@ -339,7 +355,7 @@ static int SocketRecv(SOCKET theSocket, char* buf, size_t count, bool exitonempt
 	t1=ticks_to_millisecs(gettime());
 	while(count>0)
 	{
-		ret=net_recv(theSocket,buf,(count>NET_READ_BUFFERSIZE)?NET_READ_BUFFERSIZE:count,0);
+		ret=wx_transfer_read(theSocket,buf,(count>NET_READ_BUFFERSIZE)?NET_READ_BUFFERSIZE:count);
 		if(ret==-EAGAIN)
 		{
 			t2=ticks_to_millisecs(gettime());
@@ -359,12 +375,11 @@ static int SocketRecv(SOCKET theSocket, char* buf, size_t count, bool exitonempt
 			buf+=ret;
 			count-=ret;
 			received+=ret;
-			if(count==0 || (exitonempty == true && ret == 0))
+			if(count==0 || ret == 0)
 			{
 				return received;
 			}
 			t1=ticks_to_millisecs(gettime());
-			usleep(4000);
 		}
 	}
 
@@ -405,10 +420,12 @@ static int ftp_getIP(char *buf, unsigned *ip, unsigned short *port)
 //========================================================================
 static int ftp_readline(SOCKET socket, char *buf, int len)
 {
+	u64 deadline = wx_transfer_deadline(10);
 	int i = 0, out = 0;
 	int l;
 
 	do{
+		if (wx_transfer_expired(deadline)) return -1;
 		if( (l = SocketRecv(socket, &(buf[i]), 1, true)) > 0 )
 		{
 			if(buf[i] == '\n') out = 1;
@@ -436,6 +453,8 @@ static int ftp_get_response(ftp_env* env)
 	char buf[FTP_MAX_LINE], *b;
 	int i, res = 0;
 	int multiline = 0;
+	u64 deadline = wx_transfer_deadline(10);
+	unsigned lines = 0;
 
 	i = ftp_readline(env->ctrl_socket, buf, FTP_MAX_LINE);
 	if(i < 0)
@@ -460,6 +479,7 @@ static int ftp_get_response(ftp_env* env)
 	if(multiline)
 	{
 		do {
+			if (++lines > 64 || wx_transfer_expired(deadline)) return -1;
 			i = ftp_readline(env->ctrl_socket, buf, FTP_MAX_LINE);
 			if(i < 0)
 			{
@@ -496,9 +516,18 @@ static int ftp_close_data(ftp_env* env)
 	{
 		NET_PRINTF("ftp_close_data()\n", 0);
 
-		net_close_blocking(env->data_socket);
-		env->data_socket = INVALID_SOCKET;
-		return ftp_get_response(env);
+		s32 data = env->data_socket;
+        bool writing = env->write_file != NULL;
+        if (writing) net_shutdown(data, 1); // Deliver queued data before EOF.
+        else net_close_blocking(data);
+        env->data_socket = INVALID_SOCKET;
+        int response = ftp_get_response(env);
+        if (writing) {
+            net_close_blocking(data);
+            if (response != 226 && response != 250) env->write_file->transferFailed = true;
+            env->write_file = NULL;
+        }
+        return response;
 	}
 
 	return 0;
@@ -556,6 +585,7 @@ static bool ftp_doconnect( ftp_env* env )
 	SOCKADDR_IN serverInfo;
 
 	serverInfo.sin_family = PF_INET;
+	serverInfo.sin_len = sizeof(serverInfo);
 	serverInfo.sin_addr = *((LPIN_ADDR)*hostEntry->h_addr_list);
 	serverInfo.sin_port = htons(21);
 
@@ -569,6 +599,7 @@ static bool ftp_doconnect( ftp_env* env )
 */
 
 	server_addr.sin_family = AF_INET;
+	server_addr.sin_len = sizeof(server_addr);
 	server_addr.sin_addr.s_addr = ResolveHostAddress( env->hostname );
 	server_addr.sin_port = htons(env->port);
 
@@ -599,7 +630,7 @@ static bool ftp_doconnect( ftp_env* env )
 		return false;
 	}
 
-	sprintf(buf, "USER %s", env->user);
+	format_ftp_command(buf, sizeof(buf), "USER %s", env->user);
 	if( ftp_execute(env, buf, 0, 0) < 0 )
 	{
 		NET_PRINTF( "ftp_doconnect() - USER failed\n", 0 );
@@ -615,7 +646,7 @@ static bool ftp_doconnect( ftp_env* env )
 
 	if(response == 331)
 	{
-		sprintf(buf, "PASS %s", env->password);
+		format_ftp_command(buf, sizeof(buf), "PASS %s", env->password);
 
 		if(ftp_execute(env, buf, 230, 0) < 0)
 		{
@@ -663,6 +694,7 @@ static int ftp_reconnect(ftp_env* env)
 // if res!=0, server responce is checked.
 static int ftp_execute(ftp_env* env, char *cmd, int res, int reconnect)
 {
+	if (!cmd || !cmd[0] || strpbrk(cmd, "\r\n")) return -EINVAL;
 	char buf[FTP_MAX_LINE];
 	int r;
 
@@ -678,7 +710,7 @@ static int ftp_execute(ftp_env* env, char *cmd, int res, int reconnect)
 			return r;
 	}
 
-	sprintf(buf, "%s\r\n", cmd);
+	format_ftp_command(buf, sizeof(buf), "%s\r\n", cmd);
 
 	if( SocketSend(env->ctrl_socket, buf, strlen(buf)) == false )
 	{
@@ -821,6 +853,7 @@ static int ftp_execute_open_actv(ftp_env* env, char *cmd, char *type, off_t offs
 	{
 		memset(&addr, 0, sizeof(struct sockaddr_in));
 		addr.sin_family = AF_INET;
+	addr.sin_len = sizeof(addr);
 		addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
 		ftp_close_data(env);
@@ -852,7 +885,7 @@ execute_open_actv_retry:
 
 		addr.sin_addr.s_addr = net_gethostip();
 
-		sprintf(buf, "PORT %u,%u,%u,%u,%u,%u",
+		format_ftp_command(buf, sizeof(buf), "PORT %u,%u,%u,%u,%u,%u",
 			(ntohl(addr.sin_addr.s_addr) >> 24) & 0xff,
 			(ntohl(addr.sin_addr.s_addr) >> 16) & 0xff,
 			(ntohl(addr.sin_addr.s_addr) >> 8) & 0xff,
@@ -882,7 +915,7 @@ execute_open_actv_retry:
 			return res;
 		}
 
-		sprintf(buf, "TYPE %s", type);
+		format_ftp_command(buf, sizeof(buf), "TYPE %s", type);
 
 		if((res = ftp_execute(env, buf, 200, 1)) < 0)
 		{
@@ -909,12 +942,9 @@ execute_open_actv_retry:
 		{
 			//2^32 = 4.294.967.296
 
-			u32 low_part = offset % 1000000000;
-			u32 high_part = offset / 1000000000;
-
 			NET_PRINTF("offset=%u:%u\n", (u32)(offset >> 32), (u32)(offset & 0xffffFFFF));
 
-			sprintf(buf, "REST %u%u", high_part, low_part );
+			format_ftp_command(buf, sizeof(buf), "REST %llu", (unsigned long long)offset );
 			NET_PRINTF("REST=%s\n",buf);
 			if((res = ftp_execute(env, buf, 350, 1)) < 0)
 			{
@@ -1100,7 +1130,7 @@ execute_open_retry:
 			ntohs(port));
 */
 
-		sprintf(buf, "TYPE %s", type);
+		format_ftp_command(buf, sizeof(buf), "TYPE %s", type);
 
 		if((res = ftp_execute(env, buf, 200, 1)) < 0)
 		{
@@ -1125,12 +1155,10 @@ execute_open_retry:
 
 		if( offset !=0 )
 		{
-			u32 low_part = offset % 1000000000;
-			u32 high_part = offset / 1000000000;
 
 			NET_PRINTF("offset=%u:%u\n", (u32)(offset >> 32), (u32)(offset & 0xffffFFFF));
 
-			sprintf(buf, "REST %u%u", high_part, low_part );
+			format_ftp_command(buf, sizeof(buf), "REST %llu", (unsigned long long)offset );
 			NET_PRINTF("REST=%s\n",buf);
 			if((res = ftp_execute(env, buf, 350, 1)) < 0)
 			{
@@ -1182,6 +1210,7 @@ execute_open_retry:
 			ntohs(port));
 
 		server_addr.sin_family = AF_INET;
+	server_addr.sin_len = sizeof(server_addr);
 		server_addr.sin_port = port;
 		server_addr.sin_addr.s_addr = ip;
 
@@ -1234,6 +1263,7 @@ else
 //========================================================================
 static int ftp_execute_open(ftp_env* env, char *cmd, char *type, off_t offset, SOCKET *data_sock)
 {
+	if (!cmd || !cmd[0] || strpbrk(cmd, "\r\n")) return -EINVAL;
 //	if( env->ftp_passive == false )
 if (true)
 		return ftp_execute_open_actv(env, cmd, type, offset, data_sock);
@@ -1286,13 +1316,13 @@ static void FTP_Close( ftp_env* env )
 		env->dir_cache_list = NULL;
 	}
 
-	if (env->ctrl_socket)
+	if (env->ctrl_socket >= 0)
 	{
 		net_close_blocking(env->ctrl_socket);
 		env->ctrl_socket = INVALID_SOCKET;
 	}
 
-	if (env->data_socket)
+	if (env->data_socket >= 0)
 	{
 		net_close_blocking(env->data_socket);
 		env->data_socket = INVALID_SOCKET;
@@ -1312,6 +1342,12 @@ static bool FTP_Connect(ftp_env* env, const char* name, const char* user, const 
 	NET_ASSERT( share != NULL );
 	NET_ASSERT( hostname != NULL );
 
+    if (!env || !name || !user || !password || !share || !hostname ||
+        strlen(name) > 32 || strlen(hostname) > 253 || strlen(user) > 255 ||
+        strlen(password) > 255 || strlen(share) >= FTP_MAXPATH-1 ||
+        strpbrk(user, "\r\n") || strpbrk(password, "\r\n") || strpbrk(share, "\r\n")) return false;
+    env->ctrl_socket = env->data_socket = INVALID_SOCKET;
+    env->share = NULL; env->dir_cache_list = NULL; env->write_file = NULL;
 	env->name = strdup(name);
 	env->hostname = strdup(hostname);
 	env->user = strdup(user);
@@ -1320,10 +1356,9 @@ static bool FTP_Connect(ftp_env* env, const char* name, const char* user, const 
 	env->ftp_passive = ftp_passive;
 
 	env->currentpath = (char *) malloc(FTP_MAXPATH);
-	env->currentpath[0]='\\';
-	env->currentpath[1]='\0';
-
 	env->dir_cache = (char *) malloc(FTP_MAXPATH);
+    if (!env->name || !env->hostname || !env->user || !env->password || !env->currentpath || !env->dir_cache) { FTP_Close(env); return false; }
+    env->currentpath[0] = '\\'; env->currentpath[1] = 0; env->dir_cache[0] = 0;
 	env->dir_cache_list = NULL;
 
 	//form share name:
@@ -1349,11 +1384,13 @@ static bool FTP_Connect(ftp_env* env, const char* name, const char* user, const 
 		env->currentpath[strlen(env->currentpath)-1] = 0;
 	}
 	env->share = strdup(env->currentpath);
+    if (!env->share) { FTP_Close(env); return false; }
 
 	strcpy(env->currentpath,"/");
 
 	env->ctrl_socket = INVALID_SOCKET;
 	env->data_socket = INVALID_SOCKET;
+	env->write_file = NULL;
 
 	if (ftp_doconnect(env) == false)
 	{
@@ -1367,10 +1404,12 @@ static bool FTP_Connect(ftp_env* env, const char* name, const char* user, const 
 
 //==============================================================================
 //==============================================================================
-static void AddDirEntry(FTPDIRSTATESTRUCT* state UNUSED, FTPDIRENTRYLISTITEM*** ppLastItem, const char* name, off_t size, bool isDirectory)
+static bool AddDirEntry(FTPDIRSTATESTRUCT* state UNUSED, FTPDIRENTRYLISTITEM*** ppLastItem, const char* name, off_t size, bool isDirectory)
 {
 	FTPDIRENTRYLISTITEM* pItem = ( FTPDIRENTRYLISTITEM* )malloc( sizeof( FTPDIRENTRYLISTITEM ) );
 
+    if (!pItem) { errno = ENOMEM; return false; }
+    if (strlen(name) >= sizeof(pItem->item.name)) { free(pItem); errno = ENAMETOOLONG; return false; }
 	strcpy( pItem->item.name, name);
 	pItem->item.size = size;
 	pItem->item.isDirectory = isDirectory;
@@ -1378,6 +1417,7 @@ static void AddDirEntry(FTPDIRSTATESTRUCT* state UNUSED, FTPDIRENTRYLISTITEM*** 
 
 	**ppLastItem = pItem;
 	*ppLastItem = (FTPDIRENTRYLISTITEM**)&pItem->next;
+    return true;
 }
 
 
@@ -1390,6 +1430,7 @@ static void FTP_FindClose(FTPDIRSTATESTRUCT* state)
 	NET_PRINTF( "FTP_FindClose()\n",0 );
 
 	freeDirList( state->list );
+    state->list = state->next_enum_item = NULL;
 
 	NET_PRINTF( "FTP_FindClose() ok\n",0 );
 
@@ -1397,17 +1438,20 @@ static void FTP_FindClose(FTPDIRSTATESTRUCT* state)
 
 //==============================================================================
 //==============================================================================
-static void copyDirList(FTPDIRENTRYLISTITEM** ppDest, FTPDIRENTRYLISTITEM* pSrc)
+static bool copyDirList(FTPDIRENTRYLISTITEM** ppDest, FTPDIRENTRYLISTITEM* pSrc)
 {
 	*ppDest = NULL;
+    FTPDIRENTRYLISTITEM **head = ppDest;
 	while (pSrc != NULL )
 	{
 		*ppDest = malloc( sizeof(FTPDIRENTRYLISTITEM) );
+        if (!*ppDest) { freeDirList(*head); *head = NULL; errno = ENOMEM; return false; }
 		memcpy( *ppDest, pSrc, sizeof(FTPDIRENTRYLISTITEM) );
 		(*ppDest)->next = NULL;
 		pSrc = (FTPDIRENTRYLISTITEM*)(pSrc->next);
 		ppDest = (FTPDIRENTRYLISTITEM**)&((*ppDest)->next);
 	}
+    return true;
 }
 
 //==============================================================================
@@ -1424,12 +1468,13 @@ static u64 mystrtoul64( const char* p )
 
 	while ( ( *p!=0 ) && ( *p>='0' ) && ( *p<='9' ) )
 	{
-		res = res*10 + ((*p)-'0');
+	        if (res > (0x7fffffffffffffffULL - (*p-'0'))/10) { errno = EOVERFLOW; return 0; }
+	res = res*10 + ((*p)-'0');
 		p++;
 	}
 
 
-	NET_PRINTF( "value=%s, strtoul64=%x:%x\n", p1, (u32)(res >> 32), (u32)( res & 0xffffFFFF) );
+	NET_PRINTF( "value=%s, strtoul64=%x:%x\n", p, (u32)(res >> 32), (u32)( res & 0xffffFFFF) );
 
 	return res;
 }
@@ -1468,7 +1513,7 @@ static bool FTP_FindFirst(const char *path_abs, FTPDIRSTATESTRUCT* state, ftp_en
 	//cache needs to be reloaded because of a new file might be created
 	if ( env->dir_cache_list != NULL && strcmp( env->dir_cache, path_abs ) == 0 && !dir_changed)
 	{
-		copyDirList( &(state->list), env->dir_cache_list );
+		if (!copyDirList( &(state->list), env->dir_cache_list )) return false;
 
 		state->next_enum_item = state->list;
 
@@ -1476,7 +1521,7 @@ static bool FTP_FindFirst(const char *path_abs, FTPDIRSTATESTRUCT* state, ftp_en
 		return true;
 	}
 
-	sprintf(buf, "CWD %s%s", env->share, path_abs);
+	format_ftp_command(buf, sizeof(buf), "CWD %s%s", env->share, path_abs);
 
 	t1=ticks_to_millisecs(gettime());
 
@@ -1507,18 +1552,21 @@ loaddir_retry:
 		return false;
 	}
 
-	AddDirEntry(state, &ppLastItem, ".", 0, true);
+	if (!AddDirEntry(state, &ppLastItem, ".", 0, true)) goto list_failed;
 
 	//add '..' item, if not root dir
 	if ( strlen(path_abs) != 1 )
 	{
-		AddDirEntry(state, &ppLastItem, "..", 0, true);
+		if (!AddDirEntry(state, &ppLastItem, "..", 0, true)) goto list_failed;
 	}
 
 	bool hasItems = false;
+    unsigned entries = 2;
+    u64 deadline = wx_transfer_deadline(60);
 
 	while((res = ftp_readline(data_sock, buf, FTP_MAX_LINE)) > 0)
 	{
+        if (wx_transfer_expired(deadline) || ++entries > FTP_MAX_DIRECTORY_ENTRIES) { errno = EOVERFLOW; goto list_failed; }
 //		NET_PRINTF( "ftp_readline() : %s\n", buf );
 
 		if(ftp_get_fname(buf, buf2) >= 0)
@@ -1537,7 +1585,9 @@ loaddir_retry:
 
 			ftp_get_substring(buf, buf2, 5);
 			b = buf2;
+            errno = 0;
 			filesize = mystrtoul64( b );
+            if (errno) goto list_failed;
 
 			ftp_get_substring(buf, buf2, 1);
 
@@ -1554,11 +1604,12 @@ loaddir_retry:
 				isdirectory = false;
 			}
 
-			AddDirEntry(state, &ppLastItem, filename, filesize, isdirectory);
+			if (!AddDirEntry(state, &ppLastItem, filename, filesize, isdirectory)) goto list_failed;
 			hasItems = true;
 		}
 	}
 
+	if (res < 0) goto list_failed;
 	res = ftp_close_data(env);
 	if(res < 0)
 	{
@@ -1578,7 +1629,7 @@ loaddir_retry:
 		}
 
 		strcpy( env->dir_cache, path_abs);
-		copyDirList( &(env->dir_cache_list), state->list );
+		if (!copyDirList( &(env->dir_cache_list), state->list )) env->dir_cache[0] = 0;
 	}
 
 	dir_changed = false;
@@ -1586,6 +1637,8 @@ loaddir_retry:
 	NET_PRINTF( "FTP_FindFirst() - Ok\n", 0 );
 
 	return true;
+list_failed:
+    ftp_close_data(env); FTP_FindClose(state); return false;
 }
 
 
@@ -1678,6 +1731,8 @@ static bool FTP_PathInfo(const char* path_absolute, FTPDIRENTRY* dentry, ftp_env
 //filename - full path, no share name, "/doc/file.dat"
 static bool FTP_OpenFile( const char* filename, FTPFILESTRUCT* file, ftp_env* env, int flags)
 {
+	if (!filename || strlen(filename) >= FTP_MAXPATH) return false;
+	file->flags = flags; file->transferFailed = false; file->wrote = false;
 	FTPDIRENTRY dentry;
 	char fixed_path[FTP_MAXPATH];
 
@@ -1707,8 +1762,9 @@ static bool FTP_OpenFile( const char* filename, FTPFILESTRUCT* file, ftp_env* en
 	}
 
 	file->envIndex = env->envIndex;
-	file->offset = 0;
-	file->size = dentry.size;
+	if ((flags & O_CREAT) && (flags & O_EXCL)) { errno = EEXIST; return false; }
+	file->offset = (flags & O_APPEND) ? dentry.size : 0;
+	file->size = (flags & O_TRUNC) ? 0 : dentry.size;
 	strcpy(file->filename, filename);
 
 	return true;
@@ -1733,9 +1789,8 @@ static bool FTP_ReadFile(void* buf, off_t len, off_t offset, FTPFILESTRUCT* file
 
 	if ( len == 0 ) return true;
 
-read_retry:
 
-	sprintf(buf2, "RETR %s%s", env->share, file->filename);
+	format_ftp_command(buf2, sizeof(buf2), "RETR %s%s", env->share, file->filename);
 
 	if( (res = ftp_execute_open(env, buf2, "I", offset, &data_sock)) < 0)
 	{
@@ -1744,9 +1799,10 @@ read_retry:
 		return false;
 	}
 
-	if( SocketRecv( data_sock, (char*)buf, len, false) < 0)
+	if (SocketRecv(data_sock, (char*)buf, len, true) != len)
 	{
-		goto read_retry;
+		net_close(data_sock); env->data_socket = INVALID_SOCKET;
+		return false;
 	}
 
 	last_off = offset + len;
@@ -1759,7 +1815,7 @@ read_retry:
 static bool FTP_WriteFile(void* buf, off_t len, off_t offset, FTPFILESTRUCT* file)
 {
 	NET_ASSERT( file != NULL );
-	NET_ASSERT( offset + len <= file->size );
+	if (offset < 0 || len < 0 || (u64)offset + (u64)len > 0x7fffffffffffffffULL) return false;
 
 	NET_PRINTF( "FTP_WriteFile( filename = '%s', offset = %u:%u, len= %u:%u )\n", file->filename, (u32)(offset >> 32), (u32)(offset & 0xffffFFFF), (u32)(len >> 32), (u32)(len  & 0xffffFFFF));
 
@@ -1770,9 +1826,8 @@ static bool FTP_WriteFile(void* buf, off_t len, off_t offset, FTPFILESTRUCT* fil
 
 	_FTP_lock();
 
-read_retry:
 
-	sprintf(buf2, "STOR %s%s", env->share, file->filename);
+	format_ftp_command(buf2, sizeof(buf2), "STOR %s%s", env->share, file->filename);
 
 	if( (res = ftp_execute_open(env, buf2, "I", offset, &data_sock)) < 0)
 	{
@@ -1782,9 +1837,13 @@ read_retry:
 		return false;
 	}
 
-	if( SocketSend( data_sock, (char*)buf, len) < 0)
+	env->write_file = file;
+	file->wrote = true;
+	if (!SocketSend(data_sock, (char*)buf, len))
 	{
-		goto read_retry;
+		net_close(data_sock); env->data_socket = INVALID_SOCKET;
+		file->transferFailed = true; env->write_file = NULL;
+		_FTP_unlock(); return false;
 	}
 
 	last_off = offset + len;
@@ -1800,7 +1859,7 @@ static bool FTP_MkDir(const char * name, ftp_env * env)
 	char buf2[FTP_MAXPATH + 6];
 	int res;
 
-	sprintf(buf2, "MKD %s%s", env->share, name);
+	format_ftp_command(buf2, sizeof(buf2), "MKD %s%s", env->share, name);
 
 	if((res = ftp_execute(env, buf2, 257, 0)) < 0)
 	{
@@ -1818,7 +1877,7 @@ static bool FTP_DeleteFile(const char * name, ftp_env * env)
 	char buf2[FTP_MAXPATH + 6];
 	int res;
 
-	sprintf(buf2, "DELE %s%s", env->share, name);
+	format_ftp_command(buf2, sizeof(buf2), "DELE %s%s", env->share, name);
 
 	if((res = ftp_execute(env, buf2, 250, 0)) < 0)
 	{
@@ -1835,7 +1894,7 @@ static bool FTP_DeleteDir(const char * name, ftp_env * env)
 	char buf2[FTP_MAXPATH + 6];
 	int res;
 
-	sprintf(buf2, "CDUP");
+	format_ftp_command(buf2, sizeof(buf2), "CDUP");
 
 	if((res = ftp_execute(env, buf2, 250, 0)) < 0)
 	{
@@ -1850,7 +1909,7 @@ static bool FTP_DeleteDir(const char * name, ftp_env * env)
 	if(!relativename)
 		return false;
 
-	sprintf(buf2, "RMD %s", relativename+1);
+	format_ftp_command(buf2, sizeof(buf2), "RMD %s", relativename+1);
 
 	if((res = ftp_execute(env, buf2, 250, 0)) < 0)
 	{
@@ -1868,7 +1927,7 @@ static bool FTP_Rename(const char * oldpath_absolute, const char * path_absolute
 	char buf2[FTP_MAXPATH + 6];
 	int res;
 
-	sprintf(buf2, "RNFR %s%s", env->share, oldpath_absolute);
+	format_ftp_command(buf2, sizeof(buf2), "RNFR %s%s", env->share, oldpath_absolute);
 
 	if((res = ftp_execute(env, buf2, 350, 0)) < 0)
 	{
@@ -1876,7 +1935,7 @@ static bool FTP_Rename(const char * oldpath_absolute, const char * path_absolute
 		return false;
 	}
 
-	sprintf(buf2, "RNTO %s%s", env->share, path_absolute);
+	format_ftp_command(buf2, sizeof(buf2), "RNTO %s%s", env->share, path_absolute);
 
 	if((res = ftp_execute(env, buf2, 250, 0)) < 0)
 	{
@@ -1890,15 +1949,18 @@ static bool FTP_Rename(const char * oldpath_absolute, const char * path_absolute
 
 //==============================================================================
 //==============================================================================
-static void FTP_CloseFile( FTPFILESTRUCT* file )
+static bool FTP_CloseFile( FTPFILESTRUCT* file )
 {
 	NET_ASSERT( file != NULL );
 
 	NET_PRINTF("FTP_CloseFile( fileName='%s' )\n", file->filename );
 
 	ftp_env* env = &FTPEnv[file->envIndex];
-	ftp_close_data(env);
-	//nothing to do
+	if (!file->wrote && !file->transferFailed && (file->flags & O_TRUNC)) {
+        if (!FTP_WriteFile(NULL, 0, 0, file)) file->transferFailed = true;
+    }
+    ftp_close_data(env);
+    return !file->transferFailed;
 }
 
 
@@ -2113,41 +2175,19 @@ static bool ReadFTPFromCache(void *buf, off_t len, FTPFILESTRUCT *file)
 //if '' ->  '/'
 //if invalid path -> '/'
 //all '\' replaced to '/'
-static void ftp_absolute_path_no_device(const char *srcpath, char *destpath, int envIndex)
+static bool ftp_absolute_path_no_device(const char *srcpath, char *destpath, int envIndex)
 {
-	//skip 'ftp1:'
-	if (strchr(srcpath, ':') != NULL)
-	{
-		srcpath = strchr(srcpath, ':') + 1;
-	}
-
-	if (strchr(srcpath, ':') != NULL)
-	{
-		//invalid path, with two ':' in path
-		strcpy(destpath, "/");
-		return;
-	}
-
-
-	if (srcpath[0] != '\\' && srcpath[0] != '/')
-	{
-		//relative path, 'exchange/file.dat'   ->   currentpath+'exchange/file.dat'
-		//append to current path and return
-		strcpy(destpath, FTPEnv[envIndex].currentpath);
-		strcat(destpath, srcpath);
-	}
-	else
-	{
-		//absolute path, '/exchange/file.dat'   ->   '/exchange/file.dat'
-		strcpy(destpath, srcpath);
-	}
-
-	if (destpath[0] == 0 )
-	{
-		strcpy(destpath, "/" );
-	}
-
-	ReplaceForwardSlash( destpath );
+    if (!srcpath || envIndex < 0 || envIndex >= MAX_FTP_MOUNTED) return false;
+    const char *colon = strchr(srcpath, ':');
+    if (colon) srcpath = colon+1;
+    if (strchr(srcpath, ':') || strpbrk(srcpath, "\r\n")) return false;
+    int n = (srcpath[0] != '\\' && srcpath[0] != '/')
+        ? snprintf(destpath, FTP_MAXPATH, "%s%s", FTPEnv[envIndex].currentpath, srcpath)
+        : snprintf(destpath, FTP_MAXPATH, "%s", srcpath);
+    if (n < 0 || n >= FTP_MAXPATH-1) return false;
+    if (!destpath[0]) strcpy(destpath, "/");
+    ReplaceForwardSlash(destpath);
+    return true;
 }
 
 //==============================================================================
@@ -2195,7 +2235,7 @@ static int __ftp_open(struct _reent *r, void *fileStruct, const char *path, int 
 	}
 
 
-	ftp_absolute_path_no_device(path, fixedpath, file->envIndex);
+	if (!ftp_absolute_path_no_device(path, fixedpath, env->envIndex)) { r->_errno = ENAMETOOLONG; return -1; }
 
 	NET_PRINTF("absolutepath='%s'\n", fixedpath );
 
@@ -2216,7 +2256,7 @@ static int __ftp_open(struct _reent *r, void *fileStruct, const char *path, int 
 
 //==============================================================================
 //==============================================================================
-static off_t __ftp_seek(struct _reent *r, int fd, off_t pos, int dir)
+static off_t __ftp_seek(struct _reent *r, void *fd, off_t pos, int dir)
 {
 	off_t position;
 	FTPFILESTRUCT *file = (FTPFILESTRUCT*) fd;
@@ -2250,8 +2290,7 @@ static off_t __ftp_seek(struct _reent *r, int fd, off_t pos, int dir)
 
 	if (((pos > 0) && (position < 0)) || (position > file->size))
 	{
-		r->_errno = EOVERFLOW;
-		return -1;
+		return 0;
 	}
 	if (position < 0)
 	{
@@ -2266,7 +2305,7 @@ static off_t __ftp_seek(struct _reent *r, int fd, off_t pos, int dir)
 
 //==============================================================================
 //==============================================================================
-static ssize_t __ftp_read(struct _reent *r, int fd, char *ptr, size_t len)
+static ssize_t __ftp_read(struct _reent *r, void *fd, char *ptr, size_t len)
 {
 	FTPFILESTRUCT *file = (FTPFILESTRUCT*) fd;
 
@@ -2312,7 +2351,7 @@ static ssize_t __ftp_read(struct _reent *r, int fd, char *ptr, size_t len)
 
 //==============================================================================
 //==============================================================================
-static ssize_t __ftp_write(struct _reent *r, int fd, const char *ptr, size_t len)
+static ssize_t __ftp_write(struct _reent *r, void *fd, const char *ptr, size_t len)
 {
 	FTPFILESTRUCT *file = (FTPFILESTRUCT*) fd;
 	if (file == NULL)
@@ -2335,6 +2374,7 @@ static ssize_t __ftp_write(struct _reent *r, int fd, const char *ptr, size_t len
 	}
 
 	file->offset += len;
+	if (file->offset > file->size) file->size = file->offset;
 
 	dir_changed = true;
 
@@ -2344,16 +2384,16 @@ static ssize_t __ftp_write(struct _reent *r, int fd, const char *ptr, size_t len
 
 //==============================================================================
 //==============================================================================
-static int __ftp_close(struct _reent *r UNUSED, int fd)
+static int __ftp_close(struct _reent *r UNUSED, void *fd)
 {
 	NET_PRINTF("__ftp_close()\n", 0 );
 
 	FTPFILESTRUCT *file = (FTPFILESTRUCT*) fd;
 	_FTP_lock();
 	ClearFTPFileCache(file);
-	FTP_CloseFile(file);
+	bool okay = FTP_CloseFile(file);
 	_FTP_unlock();
-
+	if (!okay) { r->_errno = EIO; return -1; }
 	return 0;
 }
 
@@ -2380,7 +2420,7 @@ static int __ftp_mkdir(struct _reent *r, const char *name, int mode UNUSED)
 		return -1;
 	}
 
-	ftp_absolute_path_no_device(name, path_absolute, env->envIndex);
+	if (!ftp_absolute_path_no_device(name, path_absolute, env->envIndex)) { r->_errno = ENAMETOOLONG; return -1; }
 
 	_FTP_lock();
 	if ( FTP_MkDir(path_absolute, env) == false)
@@ -2418,7 +2458,7 @@ static int __ftp_unlink(struct _reent *r, const char *name)
 		return -1;
 	}
 
-	ftp_absolute_path_no_device(name, path_absolute, env->envIndex);
+	if (!ftp_absolute_path_no_device(name, path_absolute, env->envIndex)) { r->_errno = ENAMETOOLONG; return -1; }
 
 	if ( FTP_PathInfo(path_absolute, &dentry, env ) == false )
 	{
@@ -2480,9 +2520,9 @@ static int __ftp_rename(struct _reent *r, const char *oldName, const char *newNa
 		return -1;
 	}
 
-	ftp_absolute_path_no_device(newName, path_absolute, env->envIndex);
+	if (!ftp_absolute_path_no_device(newName, path_absolute, env->envIndex)) { r->_errno = ENAMETOOLONG; return -1; }
 
-	ftp_absolute_path_no_device(oldName, oldpath_absolute, env->envIndex);
+	if (!ftp_absolute_path_no_device(oldName, oldpath_absolute, env->envIndex)) { r->_errno = ENAMETOOLONG; return -1; }
 
 	_FTP_lock();
 
@@ -2523,7 +2563,7 @@ static int __ftp_chdir(struct _reent *r, const char *path)
 		return -1;
 	}
 
-	ftp_absolute_path_no_device(path, path_absolute,env->envIndex);
+	if (!ftp_absolute_path_no_device(path, path_absolute,env->envIndex)) { r->_errno = ENAMETOOLONG; return -1; }
 	//path_absolute holds absolute path here
 
 	//if directory has been specified as 'exchange/name', change to 'exchange/name/'
@@ -2584,7 +2624,7 @@ static DIR_ITER* __ftp_diropen(struct _reent *r, DIR_ITER *dirState, const char 
 		return NULL;
 	}
 
-	ftp_absolute_path_no_device(path, path_absolute, env->envIndex);
+	if (!ftp_absolute_path_no_device(path, path_absolute, env->envIndex)) { r->_errno = ENAMETOOLONG; return NULL; }
 
 	if (path_absolute[strlen(path_absolute) - 1] != '/')
 	{
@@ -2616,6 +2656,7 @@ static int dentry_to_stat(FTPDIRENTRY *dentry, struct stat *st)
 	if (!dentry)
 		return -1;
 
+	memset(st, 0, sizeof(*st));
 	st->st_dev = 0;
 	st->st_ino = 0;
 
@@ -2626,11 +2667,11 @@ static int dentry_to_stat(FTPDIRENTRY *dentry, struct stat *st)
 	st->st_gid = 2; // Faked
 	st->st_size = dentry->size;
 	st->st_atime = 0;
-	st->st_spare1 = 0;
+
 	st->st_mtime = 0;
-	st->st_spare2 = 0;
+
 	st->st_ctime = 0;
-	st->st_spare3 = 0;
+
 	st->st_blksize = 1024;
 	st->st_blocks = (st->st_size + st->st_blksize - 1) / st->st_blksize; // File size in blocks
 	st->st_spare4[0] = 0;
@@ -2704,7 +2745,7 @@ static int __ftp_stat(struct _reent *r, const char *path, struct stat *st)
 	ftp_env* env;
 	env=FindFTPEnv(path_absolute);
 
-	ftp_absolute_path_no_device(path, path_absolute, env->envIndex);
+	if (!ftp_absolute_path_no_device(path, path_absolute, env->envIndex)) { r->_errno = ENAMETOOLONG; return -1; }
 
 	_FTP_lock();
 
@@ -2732,7 +2773,7 @@ static int __ftp_stat(struct _reent *r, const char *path, struct stat *st)
 
 //==============================================================================
 //==============================================================================
-static int __ftp_fstat(struct _reent *r, int fd, struct stat *st)
+static int __ftp_fstat(struct _reent *r, void *fd, struct stat *st)
 {
 	FTPFILESTRUCT *filestate = (FTPFILESTRUCT *) fd;
 
@@ -2827,7 +2868,7 @@ bool ftpInitDevice(const char* name, const char *user, const char *password, con
 	for(i=0;i<MAX_FTP_MOUNTED && FTPEnv[i].name!=NULL;i++);
 	if(i==MAX_FTP_MOUNTED) return false; //all allowed ftp connections reached
 
-	if (if_config(myIP, NULL, NULL, true) < 0)
+	if (if_config(myIP, NULL, NULL, true, 20) < 0)
 		return false;
 
 	_FTP_lock();
@@ -2894,10 +2935,10 @@ bool net_printf( const char *fmt, ... )
 	va_list va;
 
 	va_start(va, fmt);
-	vsprintf(buf2, fmt, va);
+	vsnprintf(buf2, sizeof(buf2), fmt, va);
 	va_end(va);
 
-	sprintf(buf, "%05d: %s", debug_msgid, buf2 );
+	format_ftp_command(buf, sizeof(buf), "%05d: %s", debug_msgid, buf2 );
 	debug_msgid++;
 
 	len = strlen(buf);
@@ -2905,6 +2946,7 @@ bool net_printf( const char *fmt, ... )
 	if (debug_sock == INVALID_SOCKET)
 	{
 		server_addr.sin_family = AF_INET;
+	server_addr.sin_len = sizeof(server_addr);
 		server_addr.sin_port = htons(14567);
 		server_addr.sin_addr.s_addr = inet_addr("192.168.2.11");
 

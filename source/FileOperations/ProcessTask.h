@@ -39,7 +39,10 @@ protected:
 	};
 
 	int GetItemList(list<ItemList> &fileLists, bool listDirs);
-	int ReadDirectory(string &path, ItemList &fileLists, bool listDirs);
+	int ReadDirectory(string &path, ItemList &fileLists, bool listDirs, unsigned depth = 0);
+	bool ReservePlanPath(const string &path);
+	static const u32 MaxPlanEntries = 32768, MaxPlanBytes = 4*1024*1024, MaxPlanDepth = 64;
+	u32 PlanEntries, PlanBytes;
 	void ShowProgressWindow(Task *task, int param);
 
 	ItemMarker Process;

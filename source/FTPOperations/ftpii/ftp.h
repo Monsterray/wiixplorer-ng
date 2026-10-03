@@ -32,6 +32,8 @@ extern "C"{
 
 void accept_ftp_client(s32 server);
 void set_ftp_password(char *new_password);
+void set_ftp_username(const char *user, bool anonymous);
+void set_ftp_idle_timeout(unsigned seconds);
 bool process_ftp_events(s32 server);
 void cleanup_ftp();
 

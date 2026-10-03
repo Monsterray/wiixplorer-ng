@@ -1,3 +1,4 @@
+#include "Diagnostics/Probes.h"
 /***************************************************************************
  * Copyright (C) 2009
  * by Tantric
@@ -25,6 +26,8 @@
  ***************************************************************************/
 #include "stdafx.h"
 #include "Tools/tools.h"
+#include "Memory/mem2.h"
+#include <hbc_agent.h>
 
 #define DEFAULT_FIFO_SIZE 256 * 1024
 static unsigned int *xfb[2] = { NULL, NULL }; // Double buffered
@@ -193,15 +196,39 @@ void StopGX()
  ***************************************************************************/
 void Menu_Render()
 {
+	{
+	WX_SCOPE(GPU);
+	WX_PROBE(GPU, 1, 1);
 	whichfb ^= 1; // flip framebuffer
 	GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
 	GX_SetColorUpdate(GX_TRUE);
 	GX_CopyDisp(xfb[whichfb],GX_TRUE);
 	GX_DrawDone();
+	} // Exclude VSync and diagnostic file writes from GPU completion timing.
 	VIDEO_SetNextFramebuffer(xfb[whichfb]);
 	VIDEO_Flush();
 	VIDEO_WaitVSync();
 	frameCount++;
+	if (frameCount % 120 == 0) wx_probe_flush();
+#if WX_PROBE_GPU && WX_PROBE_LEVEL >= 3
+	u8 overhi, underlow, readidle, cmdidle, brk;
+	GX_GetGPStatus(&overhi, &underlow, &readidle, &cmdidle, &brk);
+	WX_PROBE(GPU, 3, brk != 0);
+#endif
+}
+
+void Video_ShowHbcHome()
+{
+	GX_DrawDone();
+	// Lend the off-screen XFB and a temporary MEM1 buffer: VI cannot use MEM2.
+	void *extra = MEM1_memalign(32, ALIGN32(2 * vmode->fbWidth * vmode->xfbHeight));
+	if (!extra) {
+		printf("HBC HOME: not enough MEM1 for a stable overlay\n");
+		return;
+	}
+	s32 result = hbc_agent_home_fb(vmode, xfb[whichfb ^ 1], extra);
+	MEM1_free(extra);
+	if (result < 0) printf("HBC HOME unavailable: %d\n", result);
 }
 
 /****************************************************************************
@@ -478,6 +505,7 @@ void CalculateCutoff(f32 realwidth, f32 realheight, f32 minwidth, f32 maxwidth,
 void Menu_DrawImg(u8 data[], u16 width, u16 height, u8 format, f32 xpos, f32 ypos, f32 zpos,
 				  f32 degrees, f32 scaleX, f32 scaleY, u8 alpha)
 {
+	WX_PROBE(GPU, 3, data && ((uintptr_t)data & 31) != 0);
 	if(data == NULL)
 		return;
 
@@ -529,6 +557,7 @@ void Menu_DrawImgCut(u8 data[], u16 width, u16 height, u8 format, f32 xpos, f32 
 					 f32 degrees, f32 scaleX, f32 scaleY, u8 alpha, f32 minwidth, f32 maxwidth,
 					 f32 minheight, f32 maxheight)
 {
+	WX_PROBE(GPU, 3, data && ((uintptr_t)data & 31) != 0);
 	if(data == NULL)
 		return;
 

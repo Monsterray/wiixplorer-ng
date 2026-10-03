@@ -27,6 +27,8 @@
  * for Wii-Xplorer 2009
  ***************************************************************************/
 #include <stdio.h>
+#include <malloc.h>
+#include "Settings.h"
 #include <string.h>
 #include <ogcsys.h>
 #include <ogc/machine/processor.h>
@@ -34,30 +36,38 @@
 #include "FTPOperations/FTPServer.h"
 #include "http.h"
 #include "networkops.h"
-#include "netreceiver.h"
-#include "UpdateTask.h"
-
-static NetReceiver Receiver;
-static bool networkinit = false;
+#include "Diagnostics/Probes.h"
+#include <atomic>
+#include <ogc/semaphore.h>
+#include <hbc_agent.h>
+static std::atomic_bool networkinit(false);
 static char IP[16];
 static u8 * ThreadStack = NULL;
 static bool firstRun = false;
 
 static lwp_t networkthread = LWP_THREAD_NULL;
-static bool networkHalt = true;
-static bool exitRequested = false;
+static std::atomic_bool networkHalt(true);
+static std::atomic_bool exitRequested(false);
+static sem_t networkWake;
 
 /****************************************************************************
  * Initialize_Network
  ***************************************************************************/
 void Initialize_Network(void)
 {
+	WX_SCOPE(NETWORK);
+	WX_PROBE(NETWORK, 1, 1);
 	if(networkinit)
 		return;
+	// The agent may already be bringing IOS networking up. Never start it twice.
+	s32 agentNetwork = hbc_agent_net_wait(20000);
+    if (agentNetwork == -ETIMEDOUT) return;
+    // if_config also initializes libogc's standard BSD socket adapter.
+    // The bounded agent wait above prevents overlapping network startup.
 
 	s32 result;
 
-	result = if_config(IP, NULL, NULL, true);
+	result = if_config(IP, NULL, NULL, true, 20);
 
 	if(result < 0) {
 		networkinit = false;
@@ -96,34 +106,25 @@ char * GetNetworkIP(void)
  ***************************************************************************/
 void HaltNetworkThread()
 {
-	networkHalt = true;
-
-	// wait for thread to finish
-	while(!LWP_ThreadIsSuspended(networkthread))
-	{
-		usleep(100);
-	}
+    networkHalt = true;
 }
 
-/****************************************************************************
- * ResumeNetworkThread
- ***************************************************************************/
 void ResumeNetworkThread()
 {
-	networkHalt = false;
-	LWP_ResumeThread(networkthread);
+    networkHalt = false;
+    if (networkthread != LWP_THREAD_NULL) LWP_SemPost(networkWake);
 }
 
 /*********************************************************************************
- * Networkthread for background network initialize and update check with idle prio
+ * Networkthread for background network initialize with idle prio
  *********************************************************************************/
-static void * networkinitcallback(void *arg UNUSED)
+static void * networkinitcallback(void *arg __attribute__((unused)))
 {
 	while(!exitRequested)
 	{
 		if(networkHalt)
 		{
-			LWP_SuspendThread(networkthread);
+			LWP_SemWait(networkWake);
 			usleep(100);
 			continue;
 		}
@@ -133,24 +134,19 @@ static void * networkinitcallback(void *arg UNUSED)
 
 		if(!firstRun)
 		{
-			ConnectSMBShare();
-			ConnectFTP();
-			ConnectNFS();
+			if (Settings.AutoConnect) {
+				ConnectSMBShare();
+				ConnectFTP();
+				ConnectNFS();
+			}
 			if(Settings.FTPServer.AutoStart)
 				FTPServer::Instance()->StartupFTP();
-
-			UpdateTask updateTask(true, false, true);
-			updateTask.CheckForUpdate();
 
 			LWP_SetThreadPriority(networkthread, 0);
 			firstRun = true;
 		}
 
-		if(Receiver.CheckIncomming())
-		{
-			IncommingConnection(Receiver);
-		}
-
+		// HBC-Reborn owns the Wiiload/developer port; do not start a second listener.
 		usleep(200000);
 	}
 	return NULL;
@@ -161,6 +157,9 @@ static void * networkinitcallback(void *arg UNUSED)
  ***************************************************************************/
 void InitNetworkThread()
 {
+	if (networkthread != LWP_THREAD_NULL) return;
+	exitRequested = false;
+	LWP_SemInit(&networkWake, 0, 1);
 	ThreadStack = (u8 *) memalign(32, 16384);
 	if(!ThreadStack)
 		return;
@@ -174,8 +173,6 @@ void InitNetworkThread()
  ***************************************************************************/
 void ShutdownNetworkThread()
 {
-	Receiver.FreeData();
-	Receiver.CloseConnection();
 	exitRequested = true;
 
 	if(networkthread != LWP_THREAD_NULL)
@@ -183,6 +180,7 @@ void ShutdownNetworkThread()
 		ResumeNetworkThread();
 		LWP_JoinThread (networkthread, NULL);
 		networkthread = LWP_THREAD_NULL;
+		LWP_SemDestroy(networkWake);
 	}
 
 	if(ThreadStack)

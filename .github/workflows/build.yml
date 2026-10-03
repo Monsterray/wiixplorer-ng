@@ -1,0 +1,44 @@
+name: Build and regression checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 tests/regression.py
+      - run: python3 tests/stability.py
+      - run: python3 tests/dolphin_process.py
+      - run: python3 tests/probes.py
+      - run: python3 tests/hbc_agent.py
+      - run: python3 tests/hbc_smoke.py
+      - run: git diff --check
+  wii-build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitppc:latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record SDK packages
+        run: dkp-pacman -Q
+      - run: make deps
+      - run: make -j2 release
+      - run: make -j2 debug
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wiixplorer-development
+          if-no-files-found: error
+          path: |
+            build/release/boot.*
+            build/debug/boot.*
+            build/debug/build-info.json
+            build/release/build-info.json
+            build/debug/probe-config.h
+            build/release/probe-config.h

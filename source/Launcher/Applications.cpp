@@ -58,9 +58,8 @@ void Applications::Launch(int index)
 	task->SetAutoRunOnLoadFinish(true);
 }
 
-mxml_error_cb_t xmlerror(const char* error UNUSED)
+void xmlerror(const char* error UNUSED)
 {
-	return NULL;
 }
 
 bool Applications::GetNameFromXML(const char *xml, char *name)
@@ -73,7 +72,7 @@ bool Applications::GetNameFromXML(const char *xml, char *name)
 	FILE *fp = fopen(xml, "rb");
 	if (fp)
 	{
-		mxmlSetErrorCallback((mxml_error_cb_t)xmlerror);
+		mxmlSetErrorCallback(xmlerror);
 
 		tree = mxmlLoadFile(NULL, fp, MXML_NO_CALLBACK);
 
@@ -83,20 +82,19 @@ bool Applications::GetNameFromXML(const char *xml, char *name)
 			data = mxmlFindElement(tree, tree, "name", NULL, NULL, MXML_DESCEND);
 			if (data)
 			{
-				char *ptr = name;
-
-				while (data->child != NULL && ptr < name+255)
+				std::string title;
+				for(mxml_node_t *child = mxmlGetFirstChild(data); child; child = mxmlGetNextSibling(child))
 				{
-					if (data->child->value.text.whitespace)
-						*ptr++ = ' ';
-
-					strcpy(ptr, data->child->value.text.string);
-					ptr += strlen(data->child->value.text.string);
-					data->child = data->child->next;
+					int whitespace = 0;
+					const char *text = mxmlGetText(child, &whitespace);
+					if(!text)
+						continue;
+					if(whitespace && !title.empty())
+						title += ' ';
+					title += text;
 				}
-				*ptr = 0;
+				snprintf(name, 256, "%s", title.c_str());
 
-				mxmlDelete(data);
 				ret = true;
 			}
 

@@ -18,6 +18,7 @@
 #define _APPLICATION_H
 
 #include <queue>
+#include <atomic>
 #include "GUI/gui_frame.h"
 #include "GUI/gui_image.h"
 #include "GUI/gui_button.h"
@@ -35,6 +36,9 @@ class Application : public GuiFrame, public sigslot::has_slots<>
 		void init();
 		void quit();
 		void exec();
+#if WX_DEBUG_BUILD
+		void SetSmokeFrames(u32 frames) { smokeFrames = frames; }
+#endif
 		void show();
 		void hide();
 		void updateEvents();
@@ -59,21 +63,21 @@ class Application : public GuiFrame, public sigslot::has_slots<>
 
 		void SetUpdateOnly(GuiElement *e)
 		{
-			UnsetUpdateOnly(e);
 			m_mutex.lock();
+			UnsetUpdateOnly(e);
 			updateOnlyElement.push_back(e);
 			m_mutex.unlock();
 		}
 
-		void UnsetUpdateOnly(GuiElement *e)
-		{
-			for(u32 i = 0; i < updateOnlyElement.size(); ++i)
-				if(updateOnlyElement[i] == e) {
-					m_mutex.lock();
-					updateOnlyElement.erase(updateOnlyElement.begin()+i);
-					m_mutex.unlock();
-				}
-		}
+        void UnsetUpdateOnly(GuiElement *e)
+        {
+            m_mutex.lock();
+            for (u32 i=0; i<updateOnlyElement.size();) {
+                if (updateOnlyElement[i] == e) updateOnlyElement.erase(updateOnlyElement.begin()+i);
+                else ++i;
+            }
+            m_mutex.unlock();
+        }
 
 		void addPostRenderTask(ThreadedTask *t)
 		{
@@ -87,15 +91,15 @@ class Application : public GuiFrame, public sigslot::has_slots<>
 		Application();
 		virtual ~Application();
 		void OnHomeButtonClick(GuiButton *sender, int pointer, const POINT &p);
-		void OnHomeMenuClosing(GuiFrame *menu);
+		bool homePending = false;
 
 		void ProcessDeleteQueue(void);
 		void ProcessPostUpdateTasks(void);
 
 		static Application *instance;
-		static bool exitApplication;
-		static bool bReset;
-		static bool bShutdown;
+		static std::atomic_bool exitApplication;
+		static std::atomic_bool bReset;
+		static std::atomic_bool bShutdown;
 
 		GuiImage *bgImg;
 		WiiPointer *pointer[4];
@@ -105,6 +109,10 @@ class Application : public GuiFrame, public sigslot::has_slots<>
 		std::vector<GuiElement *> deleteList;
 		std::queue<ThreadedTask *> postUpdateTasks;
 		CMutex m_mutex;
+		lwp_t renderThread;
+#if WX_DEBUG_BUILD
+		u32 smokeFrames;
+#endif
 		bool bGuiInputUpdate;
 };
 

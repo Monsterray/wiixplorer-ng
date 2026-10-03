@@ -1,220 +1,130 @@
-#---------------------------------------------------------------------------------
-# Clear the implicit built in rules
-#---------------------------------------------------------------------------------
-.SUFFIXES:
-#---------------------------------------------------------------------------------
-ifeq ($(strip $(DEVKITPPC)),)
-$(error "Please set DEVKITPPC in your environment. export DEVKITPPC=<path to>devkitPPC")
-endif
-
+# Current devkitPPC/libogc build. Keep project paths relative: checkouts may contain spaces.
+.DEFAULT_GOAL := all
+DEVKITPRO ?= /opt/devkitpro
+DEVKITPPC ?= $(DEVKITPRO)/devkitPPC
 include $(DEVKITPPC)/wii_rules
 
-#---------------------------------------------------------------------------------
-# TARGET is the name of the output
-# BUILD is the directory where object files & intermediate files will be placed
-# SOURCES is a list of directories containing source code
-# INCLUDES is a list of directories containing extra header files
-#---------------------------------------------------------------------------------
-TARGET		:=	boot
-BUILD		:=	build
-SOURCES		:=	source \
-				source/ArchiveOperations \
-				source/BootHomebrew \
-				source/Controls \
-				source/DeviceControls \
-				source/DiskOperations \
-				source/FileStartUp \
-				source/FileOperations \
-				source/FTPOperations \
-				source/FTPOperations/ftpii \
-				source/GUI \
-				source/ImageOperations \
-				source/Language \
-				source/Launcher \
-				source/Memory \
-				source/Menus \
-				source/Menus/Settings \
-				source/mload \
-				source/network \
-				source/Prompts \
-				source/SoundOperations \
-				source/System \
-				source/TextOperations \
-				source/Tools \
-				source/VideoOperations
-INCLUDES	:=	source
-DATA		:=	data/binary \
-				data/fonts \
-				data/images \
-				data/sounds
-
-#---------------------------------------------------------------------------------
-# options for code generation
-#---------------------------------------------------------------------------------
-CFLAGS		=	-g -ggdb -O3 -Wall -Wextra -Wno-multichar $(MACHDEP) $(INCLUDE) \
-				-DHAVE_LIBZ -DHAVE_LIBPNG -DHAVE_LIBJPEG -DHAVE_LIBTIFF
-CXXFLAGS	=	$(CFLAGS)
-LDFLAGS		=	-g -ggdb $(MACHDEP) -Wl,-Map,$(notdir $@).map,-wrap,malloc,-wrap,free,-wrap,memalign,-wrap,calloc,-wrap,realloc,-wrap,malloc_usable_size
-#---------------------------------------------------------------------------------
-# any extra libraries we wish to link with the project
-#---------------------------------------------------------------------------------
-LIBS := -lmupdf -lzip -lunrar -lsevenzip -ldi -lgd -ltiff -ljpeg -lpng -lz -lfat -lext2fs \
-		-lntfs -lnfs -ltinysmb -lwiikeyboard -lmad -lwiiuse -lbte -lasnd -logc -lvorbisidec \
-		-lfreetype -lmxml
-#---------------------------------------------------------------------------------
-# list of directories containing libraries, this must be the top level containing
-# include and lib
-#---------------------------------------------------------------------------------
-LIBDIRS	:= $(PORTLIBS)
-
-#---------------------------------------------------------------------------------
-# no real need to edit anything past this point unless you need to add additional
-# rules for different file extensions
-#---------------------------------------------------------------------------------
-ifneq ($(BUILD),$(notdir $(CURDIR)))
-#---------------------------------------------------------------------------------
-export PROJECTDIR 	:= $(CURDIR)
-export OUTPUT		:=	$(CURDIR)/$(TARGETDIR)/$(TARGET)
-export VPATH		:=	$(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
-						$(foreach dir,$(DATA),$(CURDIR)/$(dir))
-export DEPSDIR		:=	$(CURDIR)/$(BUILD)
-
-#---------------------------------------------------------------------------------
-# automatically build a list of object files for our project
-#---------------------------------------------------------------------------------
-FILELIST	:=	$(shell bash ./filelist.sh)
-SVNREV		:=	$(shell bash ./svnrev.sh)
-export CFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-export CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-sFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
-SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.S)))
-TTFFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.ttf)))
-PNGFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.png)))
-OGGFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.ogg)))
-WAVFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.wav)))
-PCMFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.pcm)))
-ELFFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.elf)))
-DOLFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.dol)))
-BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.bin)))
-
-#---------------------------------------------------------------------------------
-# use CXX for linking C++ projects, CC for standard C
-#---------------------------------------------------------------------------------
-ifeq ($(strip $(CPPFILES)),)
-	export LD	:=	$(CC)
+FTP_BACKEND ?= ftpsrv
+CONFIG ?= release
+PROBE_LEVEL ?= 1
+PROBE_GROUPS ?= cpu,gpu,threads,io,network
+BUILD := build/$(CONFIG)
+OUTPUT := $(BUILD)/boot
+PROBE_CONFIG := $(BUILD)/probe-config.h
+RESOURCE_HEADER := $(BUILD)/Memory/filelist.h
+PREFIX_LOCAL := .deps/prefix
+SOURCES := $(shell find source -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.s' -o -name '*.S' \) | LC_ALL=C sort)
+SOURCES := $(filter-out source/gitrev.c,$(SOURCES)) source/gitrev.c
+ifeq ($(FTP_BACKEND),ftpsrv)
+SOURCES := $(filter-out source/FTPOperations/ftpii/% source/FTPOperations/MountVirtualDevices.cpp,$(SOURCES))
+FTP_BACKEND_DEFINE := -DWX_FTP_LEGACY=0
+else ifeq ($(FTP_BACKEND),ftpii)
+SOURCES := $(filter-out source/FTPOperations/ftpsrv/% source/FTPOperations/WiiXplorerFtpVfs.cpp,$(SOURCES))
+FTP_BACKEND_DEFINE := -DWX_FTP_LEGACY=1
 else
-	export LD	:=	$(CXX)
+$(error FTP_BACKEND must be ftpsrv or ftpii)
 endif
-
-export OFILES	:=	$(CPPFILES:.cpp=.o) $(CFILES:.c=.o) \
-					$(sFILES:.s=.o) $(SFILES:.S=.o) \
-					$(TTFFILES:.ttf=.ttf.o) $(PNGFILES:.png=.png.o) \
-					$(OGGFILES:.ogg=.ogg.o) $(PCMFILES:.pcm=.pcm.o) \
-					$(WAVFILES:.wav=.wav.o) $(BINFILES:.bin=.bin.o) \
-					$(addsuffix .o,$(ELFFILES)) $(addsuffix .o,$(DOLFILES)) \
-					$(CURDIR)/data/binary/magic_patcher.o
-
-#---------------------------------------------------------------------------------
-# build a list of include paths
-#---------------------------------------------------------------------------------
-export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-					$(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-					-I$(CURDIR)/$(BUILD) \
-					-I$(LIBOGC_INC) -I$(PORTLIBS)/include/freetype2
-
-#---------------------------------------------------------------------------------
-# build a list of library paths
-#---------------------------------------------------------------------------------
-export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib) \
-					-L$(LIBOGC_LIB)
-
-export OUTPUT	:=	$(CURDIR)/$(TARGET)
-.PHONY: $(BUILD) lang clean
-
-#---------------------------------------------------------------------------------
-$(BUILD):
-	@[ -d $@ ] || mkdir -p $@
-	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
-
-#---------------------------------------------------------------------------------
-lang:
-	@[ -d build ] || mkdir -p build
-	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile language
-
-#---------------------------------------------------------------------------------
-clean:
-	@echo clean ...
-	@rm -fr $(BUILD) $(OUTPUT).elf $(OUTPUT).dol
-
-#---------------------------------------------------------------------------------
-run:
-	wiiload $(OUTPUT).dol
-
-#---------------------------------------------------------------------------------
-reload:
-	wiiload -r $(OUTPUT).dol
-
-#---------------------------------------------------------------------------------
+OBJECTS := $(addprefix $(BUILD)/,$(addsuffix .o,$(SOURCES)))
+ASSETS := $(wildcard data/fonts/* data/images/* data/sounds/* data/binary/*.bin)
+ASSET_OBJECTS := $(addprefix $(BUILD)/,$(addsuffix .o,$(ASSETS)))
+CPPFLAGS := $(FTP_BACKEND_DEFINE) -D_GNU_SOURCE -include sys/param.h -include $(PROBE_CONFIG) -I$(BUILD) -Isource -I$(PREFIX_LOCAL)/include -I$(LIBOGC_INC) \
+            $(foreach dir,$(PORTLIBS),-I$(dir)/include -I$(dir)/include/freetype2) \
+            -DHAVE_LIBZ -DHAVE_LIBPNG -DHAVE_LIBJPEG -DHAVE_LIBTIFF
+HOST_CC ?= cc
+HOST_CXX ?= c++
+ifeq ($(CONFIG),debug)
+OPT ?= -Og
+DEBUG_FLAGS := -g3
 else
+OPT ?= -O2
+DEBUG_FLAGS := -g
+endif
+CFLAGS := $(MACHDEP) -std=gnu99 $(OPT) $(DEBUG_FLAGS) -Wall -Wextra -Wno-multichar
+CXXFLAGS := $(MACHDEP) -std=gnu++11 $(OPT) $(DEBUG_FLAGS) -Wall -Wextra -Wno-multichar
+LDFLAGS := $(MACHDEP) -g -Wl,-Map,$(OUTPUT).map \
+           -Wl,-wrap,malloc,-wrap,free,-wrap,memalign,-wrap,calloc,-wrap,realloc,-wrap,malloc_usable_size
+LIBPATHS := -L$(PREFIX_LOCAL)/lib $(foreach dir,$(PORTLIBS),-L$(dir)/lib) -L$(LIBOGC_LIB)
+LIBS := -Wl,--start-group -lhbcagent -lmupdf -lzip -lunrar -lsevenzip -ldi -lgd -ltiff \
+        -ljpeg -lpng -lz -lfat -lext2fs -lntfs -lnfs -ltinysmb -lwiikeyboard \
+        -lmad -lwiiuse -lbte -lasnd -logc -lvorbisidec -logg -lfreetype -lmxml \
+        -lbrotlidec -lbrotlicommon -lbz2 -lm -Wl,--end-group
 
-DEPENDS	:=	$(OFILES:.o=.d)
+.PHONY: all generated deps clean check debug release run lang FORCE
+all: $(OUTPUT).dol
 
-#---------------------------------------------------------------------------------
-# main targets
-#---------------------------------------------------------------------------------
+$(PROBE_CONFIG): FORCE
+	@python3 scripts/probe-config.py "$@" "$(CONFIG)" "$(PROBE_LEVEL)" "$(PROBE_GROUPS)" "$(OPT)" "$(CC)" "$(CFLAGS)" "$(CXXFLAGS)" "$(CPPFLAGS)"
+
+deps:
+	python3 scripts/build-deps.py
+	python3 scripts/build-hbc-agent.py
+
+$(PREFIX_LOCAL)/lib/libhbcagent.a: scripts/build-hbc-agent.py scripts/patches/hbc-agent.patch source/FileOperations/TransferFile.h source/network/TransferSocket.h
+	python3 scripts/build-hbc-agent.py
+
+generated:
+	@sh gitrev.sh
+
+
+$(RESOURCE_HEADER): FORCE scripts/resource-list.py $(ASSETS)
+	@python3 scripts/resource-list.py "$@"
+
+$(OBJECTS): $(PROBE_CONFIG) | generated $(RESOURCE_HEADER) $(PREFIX_LOCAL)/lib/libhbcagent.a
+
+$(BUILD)/source/Diagnostics/MemoryBench.cpp.o: CXXFLAGS += -O2
+
+$(BUILD)/%.cpp.o: %.cpp
+	@mkdir -p "$(@D)"
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c "$<" -o "$@"
+$(BUILD)/%.c.o: %.c
+	@mkdir -p "$(@D)"
+	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c "$<" -o "$@"
+$(BUILD)/%.s.o: %.s
+	@mkdir -p "$(@D)"
+	$(CC) $(CPPFLAGS) $(MACHDEP) -c "$<" -o "$@"
+$(BUILD)/%.S.o: %.S
+	@mkdir -p "$(@D)"
+	$(CC) $(CPPFLAGS) $(MACHDEP) -c "$<" -o "$@"
+$(BUILD)/data/%.o: data/%
+	@mkdir -p "$(@D)"
+	bin2s -a 32 "$<" | $(AS) -o "$@"
+
+source/gitrev.c: | generated
+	@test -f "$@"
+
+$(OUTPUT).elf: $(OBJECTS) $(ASSET_OBJECTS) data/binary/magic_patcher.o $(PREFIX_LOCAL)/lib/libhbcagent.a $(wildcard $(PREFIX_LOCAL)/lib/*.a) Makefile
+	$(CXX) $(OBJECTS) $(ASSET_OBJECTS) data/binary/magic_patcher.o $(LDFLAGS) $(LIBPATHS) $(LIBS) -o "$@"
+
+# wii_rules supplies the ELF-to-DOL conversion.
 $(OUTPUT).dol: $(OUTPUT).elf
-$(OUTPUT).elf: $(OFILES)
 
-language: $(wildcard $(PROJECTDIR)/Languages/*.lang)
+debug release:
+	$(MAKE) CONFIG=$@ all
+check:
+	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/regression.py
+	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/stability.py
+	python3 tests/dolphin_process.py
+	CXX="$(HOST_CXX)" python3 tests/probes.py
+	CXX="$(HOST_CXX)" python3 tests/hbc_agent.py
+	CXX="$(HOST_CXX)" python3 tests/hbc_socket_mode.py
+	python3 tests/hbc_smoke.py
+	CXX="$(HOST_CXX)" python3 tests/storage_bench.py
+	CXX="$(HOST_CXX)" python3 tests/memory_bench.py
+	CXX="$(HOST_CXX)" python3 tests/transfer_socket.py
+	CXX="$(HOST_CXX)" python3 tests/ftp_transfer.py
+	CXX="$(HOST_CXX)" python3 tests/ftp_peers.py
+	CXX="$(HOST_CXX)" python3 tests/ftp_metadata.py
+	CXX="$(HOST_CXX)" python3 tests/nfs_transfer.py
+	CXX="$(HOST_CXX)" python3 tests/thread_start.py
+	CXX="$(HOST_CXX)" python3 tests/transfer_plan.py
+	CXX="$(HOST_CXX)" python3 tests/empty_directory_transfer.py
+	CXX="$(HOST_CXX)" python3 tests/ftpsrv_socket.py
+	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/ftpsrv_integration.py
+clean:
+	rm -rf build/debug build/release boot.elf boot.dol boot.map
+run: all
+	bash scripts/dolphin.sh --build $(CONFIG)
+lang:
+	xgettext -C -cTRANSLATORS --from-code=utf-8 --sort-output --no-wrap --no-location -ktr -o Languages/boot.pot $(filter %.c %.cpp,$(SOURCES))
 
-#---------------------------------------------------------------------------------
-# This rule links in binary data with .ttf, .png, and .mp3 extensions
-#---------------------------------------------------------------------------------
-%.elf.o : %.elf
-	@echo $(notdir $<)
-	@bin2s -a 32 $< | $(AS) -o $(@)
-
-%.dol.o : %.dol
-	@echo $(notdir $<)
-	@bin2s -a 32 $< | $(AS) -o $(@)
-
-%.ttf.o : %.ttf
-	@echo $(notdir $<)
-	@bin2s -a 32 $< | $(AS) -o $(@)
-
-%.png.o : %.png
-	@echo $(notdir $<)
-	@bin2s -a 32 $< | $(AS) -o $(@)
-
-%.ogg.o : %.ogg
-	@echo $(notdir $<)
-	@bin2s -a 32 $< | $(AS) -o $(@)
-
-%.pcm.o : %.pcm
-	@echo $(notdir $<)
-	@bin2s -a 32 $< | $(AS) -o $(@)
-
-%.wav.o : %.wav
-	@echo $(notdir $<)
-	@bin2s -a 32 $< | $(AS) -o $(@)
-
-%.bin.o	:	%.bin
-	@echo $(notdir $<)
-	@bin2s -a 32 $< | $(AS) -o $(@)
-
-export PATH		:=	$(PROJECTDIR)/gettext-bin:$(PATH)
-
-%.pot: $(CFILES) $(CPPFILES)
-	@echo Updating Languagefiles ...
-	@touch $(PROJECTDIR)/Languages/$(TARGET).pot
-	@xgettext -C -cTRANSLATORS --from-code=utf-8 --sort-output --no-wrap --no-location -ktr -o$(PROJECTDIR)/Languages/$(TARGET).pot -p $@ $^
-
-%.lang: $(PROJECTDIR)/Languages/$(TARGET).pot
-	@msgmerge -U -N --no-wrap --no-location --backup=none -q $@ $<
-	@touch $@
-
--include $(DEPENDS)
-
-#---------------------------------------------------------------------------------
-endif
-#---------------------------------------------------------------------------------
+-include $(OBJECTS:.o=.d)

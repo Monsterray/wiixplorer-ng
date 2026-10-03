@@ -24,6 +24,7 @@
  * for WiiXplorer 2010
  ***************************************************************************/
 #include "network/networkops.h"
+#include "Diagnostics/HbcAgent.h"
 #include "Prompts/PromptWindows.h"
 #include "Prompts/ProgressWindow.h"
 #include "Launcher/Channels.h"
@@ -44,6 +45,21 @@
 #include "audio.h"
 #include "input.h"
 #include "sys.h"
+#include "Controls/ThreadedTaskHandler.hpp"
+#include "Controls/ExternalKeyboard.h"
+#include "Diagnostics/Probes.h"
+#include <stdlib.h>
+
+static bool cleanupComplete = false;
+enum ExitAction { ExitLoader, ExitMenu, ExitHBC, ExitReboot, ExitPower, ExitIdle, ExitStandby };
+static ExitAction exitAction = ExitLoader;
+static void RequestExit(ExitAction action)
+{
+	exitAction = action;
+	if (cleanupComplete) Sys_ExecuteExit();
+	else Application::closeRequest();
+}
+
 
 extern "C" bool RebootApp()
 {
@@ -71,25 +87,28 @@ extern "C" void ExitApp()
 		return;
 	bRunOnce = true;
 
-	if(Settings.DeleteTempPath)
-		RemoveDirectory(Settings.TempPath);
-
-	Settings.Save();
-	//! fade out
-	//! now destroy objects
-	Application::Instance()->quit();
-	Clipboard::DestroyInstance();
-	Taskbar::DestroyInstance();
-	MusicPlayer::DestroyInstance();
-	ProgressWindow::DestroyInstance();
-	FTPServer::DestroyInstance();
-	Channels::DestroyInstance();
-	SoundHandler::DestroyInstance();
-	Application::DestroyInstance();
-	Resources::DestroyInstance();
-	DeviceHandler::DestroyInstance();
-	StopGX();
-	ShutdownAudio();
+    // Stop producers while GUI, audio decoders, and mounted devices still exist.
+    Application::closeRequest();
+    HbcAgentShutdown();
+    ThreadedTaskHandler::DestroyInstance();
+    ExternalKeyboard::DestroyInstance();
+    ShutdownNetworkThread();
+    FTPServer::DestroyInstance();
+    MusicPlayer::DestroyInstance();
+    if (Settings.DeleteTempPath) RemoveDirectory(Settings.TempPath);
+    Settings.Save();
+    Application::Instance()->quit();
+    StopGX(); // Drain the GPU before releasing texture and framebuffer owners.
+    ShutdownAudio(); // Stop DMA/callbacks before releasing sounds and decoders.
+    Clipboard::DestroyInstance();
+    Taskbar::DestroyInstance();
+    ProgressWindow::DestroyInstance();
+    Channels::DestroyInstance();
+    Application::DestroyInstance();
+    Resources::DestroyInstance();
+    SoundHandler::DestroyInstance();
+    wx_probe_flush();
+    DeviceHandler::DestroyInstance();
 	ClearFontData();
 	DI2_Close();
 	USB_Deinitialize();
@@ -97,9 +116,13 @@ extern "C" void ExitApp()
 	DeInit_Network();
 	ISFS_Deinitialize();
 	MagicPatches(0);
+	cleanupComplete = true;
+#if WX_DEBUG_BUILD
+	SYS_Report("WiiXplorer: shutdown cleanup completed\n");
+#endif
 }
 
-extern "C" void __Sys_ResetCallback(void)
+extern "C" void __Sys_ResetCallback(u32 UNUSED, void * UNUSED)
 {
 	Application::resetSystem();
 }
@@ -116,7 +139,7 @@ extern "C" void Sys_Init(void)
 	SYS_SetPowerCallback(__Sys_PowerCallback);
 }
 
-extern "C" void Sys_Reboot(void)
+static void PerformReboot(void)
 {
 	ExitApp();
 	STM_RebootSystem();
@@ -143,41 +166,43 @@ static void _Sys_Shutdown(int SHUTDOWN_MODE)
 	}
 }
 
-extern "C" void Sys_Shutdown(void)
+static void PerformShutdown(void)
 {
 	_Sys_Shutdown(ShutdownToDefault);
 }
 
-extern "C" void Sys_ShutdownToIdle(void)
+static void PerformIdle(void)
 {
 	_Sys_Shutdown(ShutdownToIdle);
 }
 
-extern "C" void Sys_ShutdownToStandby(void)
+static void PerformStandby(void)
 {
 	_Sys_Shutdown(ShutdownToStandby);
 }
 
-extern "C" void Sys_LoadMenu(void)
+static void PerformMenu(void)
 {
 	ExitApp();
 
 	if(Settings.OverridePriiloader) {
 		// Priiloader shutup
-		*(u32 *)0x8132fffb = 0x50756e65;
-		DCFlushRange((u32 *)0x8132fffb, 4);
+		const u32 magic = 0x50756e65;
+		// This Priiloader marker is not word-aligned on PowerPC.
+		memcpy((void *)0x8132fffb, &magic, sizeof(magic));
+		DCFlushRange((void *)0x8132fffb, sizeof(magic));
 	}
 
 	/* Return to the Wii system menu */
 	SYS_ResetSystem(SYS_RETURNTOMENU, 0, 0);
 }
 
-extern "C" void Sys_BackToLoader(void)
+static void PerformLoader(void)
 {
 	ExitApp();
 
 	if (IsFromHBC())
-		Sys_LoadHBC();
+		exit(0); // libogc invokes the loader return stub.
 
 	// Channel Version
 	SYS_ResetSystem(SYS_RETURNTOMENU, 0, 0);
@@ -202,22 +227,44 @@ extern "C" bool IsFromHBC()
 #define HBC_1_0_7	0x00010001AF1BF516LL
 #define HBC_LULZ	0x000100014c554c5aLL
 
-extern "C" void Sys_LoadHBC(void)
+static void PerformHBC(void)
 {
 	ExitApp();
+	if (IsFromHBC()) exit(0);
 
 	WII_Initialize();
 
 	int ret = WII_LaunchTitle(HBC_LULZ);
 	if(ret < 0)
-		WII_LaunchTitle(HBC_1_0_7);
+		ret = WII_LaunchTitle(HBC_1_0_7);
 	if(ret < 0)
-		WII_LaunchTitle(HBC_JODI);
+		ret = WII_LaunchTitle(HBC_JODI);
 	if(ret < 0)
-		WII_LaunchTitle(HBC_HAXX);
+		ret = WII_LaunchTitle(HBC_HAXX);
 
 	//Back to system menu if all fails
 	SYS_ResetSystem(SYS_RETURNTOMENU, 0, 0);
+}
+
+extern "C" void Sys_Reboot(void) { RequestExit(ExitReboot); }
+extern "C" void Sys_Shutdown(void) { RequestExit(ExitPower); }
+extern "C" void Sys_ShutdownToIdle(void) { RequestExit(ExitIdle); }
+extern "C" void Sys_ShutdownToStandby(void) { RequestExit(ExitStandby); }
+extern "C" void Sys_LoadMenu(void) { RequestExit(ExitMenu); }
+extern "C" void Sys_BackToLoader(void) { RequestExit(ExitLoader); }
+extern "C" void Sys_LoadHBC(void) { RequestExit(ExitHBC); }
+extern "C" void Sys_ExecuteExit(void)
+{
+    ExitApp();
+    switch (exitAction) {
+        case ExitMenu: PerformMenu(); break;
+        case ExitHBC: PerformHBC(); break;
+        case ExitReboot: PerformReboot(); break;
+        case ExitPower: PerformShutdown(); break;
+        case ExitIdle: PerformIdle(); break;
+        case ExitStandby: PerformStandby(); break;
+        default: PerformLoader(); break;
+    }
 }
 
 extern "C" int GetIOS_Rev(u32 ios)

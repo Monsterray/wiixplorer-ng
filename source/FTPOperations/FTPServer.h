@@ -26,29 +26,38 @@
 #ifndef FTP_SERVER_H_
 #define FTP_SERVER_H_
 
-#include "stdafx.h"
-#include "Controls/CThread.h"
-#include "Controls/GXConsole.hpp"
+#include <gctypes.h>
+#include <atomic>
+#include <ogc/lwp.h>
 
-class FTPServer : public CThread
+class FTPServer
 {
-	public:
-		static FTPServer * Instance() { if(!instance) instance = new FTPServer(); return instance; }
-		static void DestroyInstance() { delete instance; instance = NULL; }
-		void StartupFTP();
-		void ShutdownFTP();
-		bool isRunning() const { return ftp_running; }
-	protected:
-		FTPServer();
-		virtual ~FTPServer();
-
-		void executeThread();
-
-		static FTPServer *instance;
-		s32 server;
-		bool ftp_running;
-		bool ExitRequested;
+public:
+    static FTPServer *Instance() { if (!instance) instance = new FTPServer(); return instance; }
+    static void DestroyInstance() { delete instance; instance = NULL; }
+    void StartupFTP();
+    void ShutdownFTP();
+    bool isRunning() const { return ftp_running; }
+    static s32 status() { return listenerStatus; }
+    static u32 cycles() { return eventCycles; }
+    static u32 port() { return listenerPort; }
+    static bool stopping() { return stopRequested; }
+private:
+    FTPServer();
+    ~FTPServer();
+    static void *threadEntry(void *arg);
+    void executeThread();
+    void stopLocked();
+    static FTPServer *instance;
+    static std::atomic<s32> listenerStatus;
+    static std::atomic<u32> eventCycles, listenerPort;
+    static std::atomic_bool stopRequested;
+    std::atomic_bool ftp_running;
+    lwp_t worker;
+    void *stack;
+    s32 server;
+    std::atomic_flag lifecycleBusy = ATOMIC_FLAG_INIT;
+    void lockLifecycle();
+    void unlockLifecycle();
 };
-
 #endif
-

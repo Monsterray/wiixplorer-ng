@@ -49,7 +49,6 @@ extern const u8 app_booter_bin[];
 extern const u32 app_booter_bin_size;
 
 typedef void (*entrypoint) (void);
-extern "C" { void __exception_closeall(); }
 
 static u8 *homebrewbuffer = EXECUTE_ADDR;
 static u32 homebrewsize = 0;
@@ -188,7 +187,8 @@ int BootHomebrew()
 
 	SYS_ResetSystem(SYS_SHUTDOWN, 0, 0);
 	_CPU_ISR_Disable (cpu_isr);
-	__exception_closeall();
+	// Current libogc shuts down IRQs through SYS_SHUTDOWN; the booter installs
+	// the next application's exception vectors. Do not call removed private APIs.
 	entry();
 	_CPU_ISR_Restore (cpu_isr);
 

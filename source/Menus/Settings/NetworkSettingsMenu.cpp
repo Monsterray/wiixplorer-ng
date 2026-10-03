@@ -24,7 +24,6 @@
 #include "Controls/ThreadedTaskHandler.hpp"
 #include "Prompts/PromptWindows.h"
 #include "Prompts/ProgressWindow.h"
-#include "network/UpdateTask.h"
 #include "Settings.h"
 
 NetworkSettingsMenu::NetworkSettingsMenu(GuiFrame *r)
@@ -94,19 +93,7 @@ void NetworkSettingsMenu::SetOptionValues()
 
 void NetworkSettingsMenu::OnUpdateButtonClick(GuiButton *sender UNUSED, int pointer UNUSED, const POINT &p UNUSED)
 {
-	if(!NetworkInitPrompt())
-		return;
-
-	if(ProgressWindow::Instance()->IsRunning())
-	{
-		ThrowMsg(tr("Error:"), tr("A task is in progress. Can't run update check right now."));
-		return;
-	}
-
-	UpdateTask *task = new UpdateTask(true, false, false);
-	task->SetAutoDelete(true);
-	Taskbar::Instance()->AddTask(task);
-	ThreadedTaskHandler::Instance()->AddTask(task);
+	ThrowMsg(tr("Updates disabled"), tr("The legacy update service is no longer supported. Install updates manually."));
 }
 
 void NetworkSettingsMenu::OnOptionClick(GuiOptionBrowser *sender UNUSED, int option)

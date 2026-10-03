@@ -1,3 +1,4 @@
+#include "network/TransferSocket.h"
 /*
 
 Copyright (C) 2008 Joseph Jordan <joe.ftpii@psychlaw.com.au>
@@ -38,6 +39,16 @@ misrepresented as being the original software.
 #define FREAD_BUFFER_SIZE (60*1024)
 
 static u32 NET_BUFFER_SIZE = MAX_NET_BUFFER_SIZE;
+/* The retained comparison backend must also release its scratch arena. */
+static char *transfer_buffer;
+s32 init_ftp_buffers(void) {
+    if (!transfer_buffer) transfer_buffer = (char *)memalign(32, MAX_NET_BUFFER_SIZE);
+    return transfer_buffer ? 0 : -ENOMEM;
+}
+void cleanup_ftp_buffers(void) {
+    free(transfer_buffer); transfer_buffer = NULL;
+    NET_BUFFER_SIZE = MAX_NET_BUFFER_SIZE;
+}
 
 #if 0
 void initialise_network() {
@@ -77,16 +88,16 @@ s32 net_close_blocking(s32 s) {
 
 s32 create_server(u16 port) {
 	s32 server = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-	if (server < 0)
-		return -1;
-
-	set_blocking(server, false);
+	if (server < 0) return server;
+    s32 mode = set_blocking(server, false);
+    if (mode < 0) { net_close(server); return mode; }
 
 	struct sockaddr_in bindAddress;
 	memset(&bindAddress, 0, sizeof(bindAddress));
 	bindAddress.sin_family = AF_INET;
+	bindAddress.sin_len = sizeof(bindAddress);
 	bindAddress.sin_port = htons(port);
-	bindAddress.sin_addr.s_addr = htonl(INADDR_ANY);
+	bindAddress.sin_addr.s_addr = net_gethostip();
 
 	s32 ret;
 	if ((ret = net_bind(server, (struct sockaddr *)&bindAddress, sizeof(bindAddress))) < 0) {
@@ -103,15 +114,13 @@ s32 create_server(u16 port) {
 	return server;
 }
 
-typedef s32 (*transferrer_type)(s32 s, void *mem, s32 len);
-static s32 transfer_exact(s32 s, char *buf, s32 length, transferrer_type transferrer) {
+static s32 transfer_exact(s32 s, char *buf, s32 length) {
 	s32 result = 0;
 	s32 remaining = length;
 	s32 bytes_transferred;
-	set_blocking(s, true);
 	while (remaining) {
 		try_again_with_smaller_buffer:
-		bytes_transferred = transferrer(s, buf, MIN(remaining, (int) NET_BUFFER_SIZE));
+		bytes_transferred = wx_transfer_write(s, buf, MIN(remaining, (int) NET_BUFFER_SIZE));
 		if (bytes_transferred > 0) {
 			remaining -= bytes_transferred;
 			buf += bytes_transferred;
@@ -127,20 +136,19 @@ static s32 transfer_exact(s32 s, char *buf, s32 length, transferrer_type transfe
 			result = -ENODATA;
 			break;
 		}
-		usleep(100);
 	}
 	set_blocking(s, false);
 	return result;
 }
 
 s32 send_exact(s32 s, char *buf, s32 length) {
-	return transfer_exact(s, buf, length, (transferrer_type)net_write);
+	return transfer_exact(s, buf, length);
 }
 
 s32 send_from_file(s32 s, FILE *f) {
-	char * buf = (char *) malloc(FREAD_BUFFER_SIZE);
-	if(!buf)
-		return -1;
+	/* Callbacks run serially on the single FTP server thread. */
+	if (!transfer_buffer) return -ENOMEM;
+    char *buf = transfer_buffer;
 
 	s32 bytes_read;
 	s32 result = 0;
@@ -151,45 +159,20 @@ s32 send_from_file(s32 s, FILE *f) {
 		if (result < 0) goto end;
 	}
 	if (bytes_read < FREAD_BUFFER_SIZE) {
-		result = -!feof(f);
+		result = ferror(f) || !feof(f) ? -EIO : 0;
 		goto end;
 	}
-	free(buf);
-	return -EAGAIN;
+	return bytes_read;
 	end:
-	free(buf);
 	return result;
 }
 
 s32 recv_to_file(s32 s, FILE *f) {
-	char * buf = (char *) malloc(NET_BUFFER_SIZE);
-	if(!buf)
-		return -1;
-
-	s32 bytes_read;
-	while (1) {
-		try_again_with_smaller_buffer:
-		bytes_read = net_read(s, buf, NET_BUFFER_SIZE);
-		if (bytes_read < 0) {
-			if (bytes_read == -EINVAL && NET_BUFFER_SIZE == MAX_NET_BUFFER_SIZE) {
-				NET_BUFFER_SIZE = MIN_NET_BUFFER_SIZE;
-				usleep(100);
-				goto try_again_with_smaller_buffer;
-			}
-			free(buf);
-			return bytes_read;
-		} else if (bytes_read == 0) {
-			free(buf);
-			return 0;
-		}
-
-		s32 bytes_written = fwrite(buf, 1, bytes_read, f);
-		if (bytes_written < bytes_read)
-		{
-			free(buf);
-			return -1;
-		}
-		usleep(100);
-	}
-	return -1;
+    if (!transfer_buffer) return -ENOMEM;
+    char *buf = transfer_buffer;
+    s32 bytes_read = net_read(s, buf, MIN(NET_BUFFER_SIZE, 16384));
+    if (bytes_read <= 0) return bytes_read;
+    if (fwrite(buf, 1, bytes_read, f) != (size_t)bytes_read) return -EIO;
+    // Yield to the other clients after one chunk; positive means progress.
+    return bytes_read;
 }

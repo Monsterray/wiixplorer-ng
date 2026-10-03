@@ -309,7 +309,6 @@ bool AppControls::Save()
 	FILE * file = fopen(FilePath, "w");
 	if(!file)
 	{
-		fclose(file);
 		return false;
 	}
 
@@ -379,9 +378,9 @@ bool AppControls::Save()
 	fprintf(file, "ScreenshotHoldButton = %d\n", ScreenshotHoldButton);
 	fprintf(file, "ScreenshotClickButton = %d\n", ScreenshotClickButton);
 
-	fclose(file);
-
-	return true;
+	bool saved = !ferror(file);
+	if (fclose(file)) saved = false;
+	return saved;
 }
 
 bool AppControls::SetControl(char *name, char *value)

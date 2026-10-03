@@ -1,0 +1,375 @@
+--- a/sdk/hbc_agent.h
++++ b/sdk/hbc_agent.h
+@@ -157,6 +157,10 @@
+    negative error when the thread cannot start. Call once. */
+ s32 hbc_agent_init(const hbc_agent_config *cfg);
+ 
++/* WiiXplorer addition: join the listener before unmounting devices.
++   Call from the app thread, outside the HOME overlay. */
++void hbc_agent_shutdown(void);
++
+ /* True once `hbc.py exit` or `hbc.py run` asked the app to exit. */
+ bool hbc_agent_exit_requested(void);
+ 
+--- a/sdk/hbc_agent/agent.c
++++ b/sdk/hbc_agent/agent.c
+@@ -11,6 +11,7 @@
+ // hbc_agent_home()).
+ 
+ #include <errno.h>
++#include <fcntl.h>
+ #include <malloc.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -65,6 +66,8 @@
+ static u8 *stack;
+ static u64 start_ticks;
+ static volatile bool exit_requested;
++// WiiXplorer: orderly shutdown keeps requests away from unmounted devices.
++static volatile bool stop_requested;
+ #if AGENT_TUXEDO
+ static PPCExcptPanicFn prev_panic;
+ #endif
+@@ -436,16 +439,17 @@
+ }
+ 
+ // Leaves the app for HBC, through the reload stub like any other exit().
+-static void __attribute__((noreturn)) agent_exit(void) {
++static void agent_exit(void) {
+ 	exit_requested = true;
+ 
+ 	if (cfg.app_polls_exit) {
+ 		u64 t = gettime();
+ 
+-		while (ticks_to_millisecs(diff_ticks(t, gettime())) < cfg.exit_grace_ms)
++		while (!stop_requested && ticks_to_millisecs(diff_ticks(t, gettime())) < cfg.exit_grace_ms)
+ 			usleep(50 * 1000);
+ 	}
+ 
++	if (stop_requested) return;
+ 	// The app did not exit by itself (or does not poll): do it here, above
+ 	// the app's threads so they cannot run into a half-shut-down system.
+ 	LWP_SetThreadPriority(LWP_GetSelf(), LWP_PRIO_HIGHEST);
+@@ -474,11 +478,13 @@
+ 		devfile_reply(s, 0, NULL, 0);
+ 		tcp_close(s);
+ 		agent_exit();
++		return;
+ 	} else if (!memcmp(hdr, "HAXX", 4)) {
+ 		// Uploads need HBC's loader. Close without reading, so the client
+ 		// sees the upload fail, and go back to HBC for the retry.
+ 		net_close(s);
+ 		agent_exit();
++		return;
+ 	} else {
+ 		devfile_reply(s, -ENOSYS, NULL, 0);
+ 	}
+@@ -495,7 +501,7 @@
+ 			if (res < 0 && res != -EBUSY)
+ 				return res;
+ 		}
+-		while ((res = net_get_status()) == -EBUSY)
++		while (!stop_requested && (res = net_get_status()) == -EBUSY)
+ 			usleep(50 * 1000);
+ 	}
+ 	return res < 0 ? res : 0;
+@@ -508,7 +514,7 @@
+ 	u8 hdr[16];
+ 	(void) arg;
+ 
+-	while (true) {
++	while (!stop_requested) {
+ 		// The overlay's "hbc.py connection" switch.
+ 		if (!agent_listen_enabled) {
+ 			if (ls >= 0) {
+@@ -523,6 +529,7 @@
+ 				usleep(AGENT_RETRY_MS * 1000);
+ 				continue;
+ 			}
++			if (stop_requested) break;
+ 			mask = net_gethostip() & 0xffff0000;
+ 			ls = tcp_listen(LD_TCP_PORT, 3);
+ 			if (ls < 0) {
+@@ -560,15 +567,25 @@
+ 			continue;
+ 		}
+ 
++        // POSIX accepted sockets need not inherit O_NONBLOCK. All protocol
++        // receive deadlines require nonblocking reads, including on Dolphin.
++        s32 flags = net_fcntl(s, F_GETFL, 0);
++        if (flags < 0 || net_fcntl(s, F_SETFL, flags | 4) < 0) {
++            net_close(s);
++            continue;
++        }
++
+ 		// Like HBC, answer only the Wii's own /16.
+ 		if ((sa.sin_addr.s_addr & 0xffff0000) != mask ||
+ 				!tcp_read_timeout(s, hdr, sizeof(hdr), NULL, NULL, LD_HEADER_TIMEOUT)) {
+ 			net_close(s);
+ 			continue;
+ 		}
++		if (stop_requested) { net_close(s); break; }
+ 		handle(s, hdr, sa.sin_addr.s_addr);
+ 		request_ticks += diff_ticks(woke, gettime());
+ 	}
++	if (ls >= 0) net_close(ls);
+ 	return NULL;
+ }
+ 
+@@ -742,3 +759,17 @@
+ 	}
+ 	return res < 0 ? res : 0;
+ }
++
++// WiiXplorer addition: no callback/thread may outlive the mounted devices.
++void hbc_agent_shutdown(void) {
++	stop_requested = true;
++	devfile_abort();
++	if (thread != LWP_THREAD_NULL && !cfg.no_network)
++		LWP_JoinThread(thread, NULL);
++	thread = LWP_THREAD_NULL;
++	free(stack);
++	stack = NULL;
++	devstream_release();
++	if (devoptab_list[STD_OUT] == &log_dotab_out) devoptab_list[STD_OUT] = log_prev_out;
++	if (devoptab_list[STD_ERR] == &log_dotab_err) devoptab_list[STD_ERR] = log_prev_err;
++}
+--- a/sdk/hbc_agent/overlay.c
++++ b/sdk/hbc_agent/overlay.c
+@@ -1482,7 +1482,7 @@
+ 		cal_sample();
+ 		fx_tick();
+ 		// An Exit choice the app handles: close everything first.
+-		if (r.exit_choice && !ui.closing)
++		if ((r.exit_choice || hbc_agent_exit_requested()) && !ui.closing)
+ 			pressed = OV_HOME;
+ 		running = ov_step(&ui, &r.ext, pressed, act, NULL);
+ 
+--- a/channel/channelapp/source/devfile.c
++++ b/channel/channelapp/source/devfile.c
+@@ -1,3 +1,5 @@
++#include "TransferFile.h"
++#include "TransferSocket.h"
+ // File requests of the developer protocol (HBCF, docs/devnet.md), shared by
+ // HBC's loader thread and the in-app agent (sdk/hbc_agent). Framed transfers
+ // run in devstream.c; this file validates paths and runs the other ops.
+@@ -38,6 +40,7 @@
+ static volatile bool busy, abort_requested;
+ static volatile s32 active_socket = -1;
+ static s32 request_prio;
++static u64 request_deadline;
+ 
+ static u16 get_u16(const u8 *p) {
+ 	return (p[0] << 8) | p[1];
+@@ -58,15 +61,13 @@
+ // block as sent after queueing only part of it (seen on a Wii at the 4 KiB
+ // mark; Dolphin uses host sockets and does not). Send blocking instead.
+ bool devfile_send_all(s32 s, const void *data, u32 len) {
+-	s32 flags = net_fcntl(s, F_GETFL, 0);
+-	bool ok;
+-
+-	if (flags >= 0)
+-		net_fcntl(s, F_SETFL, flags & ~4);
+-	ok = tcp_write(s, data, len, NULL, NULL);
+-	if (flags >= 0)
+-		net_fcntl(s, F_SETFL, flags);
+-	return ok;
++    const u8 *p = data;
++    while (len) {
++        s32 sent = wx_transfer_write(s, p, len);
++        if (sent <= 0) return false;
++        p += sent; len -= sent;
++    }
++    return true;
+ }
+ 
+ // Reply header: s32 status (0 or -errno), u32 payload length.
+@@ -128,14 +129,14 @@
+ 
+ 	f = fopen(part, "wb");
+ 	if (!f)
+-		err = -errno;
++		err = errno ? -errno : -EIO;
+ 
+ 	// Read the whole upload even after an error, so the reply stays in sync.
+ 	while (left) {
+ 		u32 block = left > DEVFILE_CHUNK ? DEVFILE_CHUNK : left;
+ 		u64 t0 = gettime();
+ 
+-		if (abort_requested) {
++		if (devfile_aborted()) {
+ 			err = -EINTR;
+ 			break;
+ 		}
+@@ -153,13 +154,9 @@
+ 	}
+ 
+ 	if (f && fclose(f) && !err)
+-		err = -errno;
+-
+-	if (!err) {
+-		unlink(path);
+-		if (rename(part, path))
+-			err = -errno;
+-	} else if (f) {
++		err = errno ? -errno : -EIO;
++
++	if (err && f) {
+ 		unlink(part);
+ 	}
+ 
+@@ -174,7 +171,7 @@
+ 	FILE *f;
+ 	u32 left;
+ 
+-	if (stat(path, &sb) || !S_ISREG(sb.st_mode)) {
++	if (stat(path, &sb) || !S_ISREG(sb.st_mode) || sb.st_size < 0 || (u64)sb.st_size > DEVFILE_PUT_MAX) {
+ 		devfile_reply(s, -ENOENT, NULL, 0);
+ 		return;
+ 	}
+@@ -193,12 +190,11 @@
+ 			u32 block = left > DEVFILE_CHUNK ? DEVFILE_CHUNK : left;
+ 			u64 t0 = gettime();
+ 
+-			// A short read means the file changed; pad so the length holds.
++			// A short read is a failed transfer, never fabricate successful data.
+ 			size_t got = fread(chunk, 1, block, f);
+-			if (got < block)
+-				memset(chunk + got, 0, block - got);
++			if (got != block) { net_shutdown(s, 2); break; }
+ 			u64 t1 = gettime();
+-			bool ok = !abort_requested && devfile_send_all(s, chunk, block);
++			bool ok = !devfile_aborted() && devfile_send_all(s, chunk, block);
+ 			st->disk += diff_ticks(t0, t1);
+ 			st->net += diff_ticks(t1, gettime());
+ 			st->wire += block;
+@@ -268,6 +264,9 @@
+ 		devfile_reply(s, -ENOENT, NULL, 0);
+ 		return;
+ 	}
++	if (st.st_size < 0 || (u64)st.st_size > DEVFILE_PUT_MAX) {
++        devfile_reply(s, -EFBIG, NULL, 0); return;
++    }
+ 	if (S_ISDIR(st.st_mode)) {
+ 		devfile_reply(s, -EISDIR, NULL, 0);
+ 		return;
+@@ -278,9 +277,15 @@
+ 		devfile_reply(s, -errno, NULL, 0);
+ 		return;
+ 	}
+-	while ((got = fread(chunk, 1, DEVFILE_CHUNK, f)) > 0 && !abort_requested)
++	u64 total = 0;
++	while (!devfile_aborted() && (got = fread(chunk, 1, DEVFILE_CHUNK, f)) > 0) {
++        total += got;
++        if (total > (u64)st.st_size) break;
+ 		crc = crc32(crc, chunk, got);
+-	fclose(f);
++    }
++    bool failed = ferror(f) || total != (u64)st.st_size;
++    if (fclose(f)) failed = true;
++    if (failed || devfile_aborted()) { devfile_reply(s, failed ? -EIO : -EINTR, NULL, 0); return; }
+ 
+ 	put_u32(out, st.st_size);
+ 	put_u32(out + 4, crc);
+@@ -289,7 +294,7 @@
+ 
+ static void file_request(s32 s, const u8 *hdr, devfile_change_fn changed) {
+ 	char path[DEVFILE_PATH_MAX];
+-	char part[DEVFILE_PATH_MAX + 8];
++	wx_transfer_file transfer;
+ 	u8 op = hdr[4];
+ 	u16 path_len = get_u16(hdr + 6);
+ 	u32 size = get_u32(hdr + 8);
+@@ -330,9 +335,14 @@
+ 			break;
+ 		}
+ 		make_parents(path);
+-		snprintf(part, sizeof(part), "%s.part", path);
+-		err = op == 'p' ? devstream_put(s, path, part, size, &devfile_last.st)
+-						: file_put_raw(s, path, part, size);
++		if (wx_transfer_begin(&transfer, path) != 0) {
++            devfile_reply(s, -EIO, NULL, 0); break;
++        }
++        err = op == 'p' ? devstream_put(s, path, transfer.staged, size, &devfile_last.st)
++                        : file_put_raw(s, path, transfer.staged, size);
++        if (!err && wx_transfer_publish(&transfer, transfer.staged, path) != 0)
++            err = -EIO;
++        wx_transfer_abort(&transfer);
+ 		if (!err && changed)
+ 			changed(path);
+ 		devfile_reply(s, err, NULL, 0);
+@@ -386,6 +396,7 @@
+ 	}
+ 
+ 	abort_requested = false;
++	request_deadline = wx_transfer_deadline(600);
+ 	active_socket = s;
+ 	request_prio = prio;
+ 	busy = true;
+@@ -401,7 +412,7 @@
+ }
+ 
+ bool devfile_aborted(void) {
+-	return abort_requested;
++	return abort_requested || wx_transfer_expired(request_deadline);
+ }
+ 
+ s32 devfile_prio(void) {
+--- a/channel/channelapp/source/devstream.c
++++ b/channel/channelapp/source/devstream.c
+@@ -9,6 +9,8 @@
+ // same time and the PPC compresses while the radio is busy.
+ 
+ #include <errno.h>
++#include <fcntl.h>
++#include <network.h>
+ #include <malloc.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -249,12 +251,8 @@
+ 
+ 	err = job.result;
+ 	if (fclose(job.f) && !err)
+-		err = -errno;
+-	if (!err) {
+-		unlink(path);
+-		if (rename(part, path))
+-			err = -errno;
+-	} else {
++		err = errno ? -errno : -EIO;
++	if (err) {
+ 		unlink(part);
+ 	}
+ 	return err;
+@@ -326,7 +324,7 @@
+ 	u8 hdr[8];
+ 	bool sending = true;
+ 
+-	if (stat(path, &st) || !S_ISREG(st.st_mode)) {
++	if (stat(path, &st) || !S_ISREG(st.st_mode) || st.st_size < 0 || (u64)st.st_size > 512*1024*1024ULL) {
+ 		devfile_reply(s, -ENOENT, NULL, 0);
+ 		return;
+ 	}
+@@ -353,10 +351,14 @@
+ 		return;
+ 	}
+ 
++    // This phase only sends. Retain blocking mode across frames, avoiding
++    // repeated IOS mode switches while capacity polling bounds each send.
++    s32 sendFlags = net_fcntl(s, F_GETFL, 0);
++    if (sendFlags < 0 || net_fcntl(s, F_SETFL, sendFlags & ~4) < 0) sending = false;
+ 	put_u32(hdr, 0);
+ 	put_u32(hdr + 4, job.size);
+ 	u64 t0 = gettime();
+-	sending = devfile_send_all(s, hdr, sizeof(hdr));
++	sending = sending && devfile_send_all(s, hdr, sizeof(hdr));
+ 	stats->net += diff_ticks(t0, gettime());
+ 
+ 	while (true) {
+@@ -394,5 +396,6 @@
+ 	}
+ 
+ 	teardown();
++	if (sendFlags >= 0) net_fcntl(s, F_SETFL, sendFlags);
+ 	fclose(job.f);
+ }

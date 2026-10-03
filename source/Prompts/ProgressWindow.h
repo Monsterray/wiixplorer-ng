@@ -42,7 +42,7 @@ public:
 
 	const char * GetTitle() const { return ProgressTitle; };
 	void SetProgressType(int mode);
-	bool IsCanceled() const { return Canceled; }
+	bool IsCanceled() const;
 	bool IsMinimized() const { return Minimized; }
 	bool IsRunning() const { return !WindowClosed || Minimized; }
 	void Draw();

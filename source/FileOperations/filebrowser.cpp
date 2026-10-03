@@ -299,7 +299,7 @@ static int FileSortCallback(const void *file1, const void *file2)
 	if(f1->isdir && !(f2->isdir)) return -1;
 	if(!(f1->isdir) && (f2->isdir)) return 1;
 
-	return stricmp(f1->filename, f2->filename);
+	return strcasecmp(f1->filename, f2->filename);
 }
 
 /****************************************************************************

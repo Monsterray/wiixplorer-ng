@@ -50,9 +50,8 @@ void CopyTask::Execute(void)
 
 	int result = 0;
 
-	if(GetItemList(itemList, false) < 0) {
-		result = -1;
-	}
+    int planned = GetItemList(itemList, true);
+    if (planned < 0) result = planned;
 
 	//! free memory of process which is no longer required
 	Process.Reset();
@@ -64,8 +63,17 @@ void CopyTask::Execute(void)
 
 	for(list<ItemList>::iterator listItr = itemList.begin(); listItr != itemList.end(); listItr++)
 	{
+        for (list<string>::iterator dir = listItr->dirs.begin(); dir != listItr->dirs.end(); ++dir) {
+            if (ProgressWindow::Instance()->IsCanceled() || Application::isClosing()) {
+                result = PROGRESS_CANCELED; break;
+            }
+            if (!CreateSubfolder((destPathSlash+*dir).c_str())) result = -1;
+        }
 		for(list<string>::iterator itr = listItr->files.begin(); itr != listItr->files.end(); itr++)
 		{
+            if (ProgressWindow::Instance()->IsCanceled() || Application::isClosing()) {
+                result = PROGRESS_CANCELED; break;
+            }
 			string srcpath = listItr->basepath + *itr;
 			string dstpath = destPathSlash + *itr;
 
@@ -84,7 +92,7 @@ void CopyTask::Execute(void)
 				result = ret;
 		}
 
-		if(ProgressWindow::Instance()->IsCanceled())
+		if(result == PROGRESS_CANCELED || ProgressWindow::Instance()->IsCanceled() || Application::isClosing())
 		{
 			result = PROGRESS_CANCELED;
 			break;

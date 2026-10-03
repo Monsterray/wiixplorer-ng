@@ -236,6 +236,7 @@ static void stat_entry(DIR_ENTRY *entry, struct stat *st)
 		return;
 
 	time_t t = time(0);
+	memset(st, 0, sizeof(*st));
 	st->st_dev = DEV_ID;
 	st->st_ino = 0;
 	st->st_mode = (is_dir(entry) ? S_IFDIR : S_IFREG) | (S_IRUSR | S_IRGRP | S_IROTH);
@@ -245,15 +246,13 @@ static void stat_entry(DIR_ENTRY *entry, struct stat *st)
 	st->st_rdev = st->st_dev;
 	st->st_size = entry->size;
 	st->st_atime = t;
-	st->st_spare1 = 0;
+
 	st->st_mtime = t;
-	st->st_spare2 = 0;
+
 	st->st_ctime = t;
-	st->st_spare3 = 0;
+
 	st->st_blksize = SECTOR_SIZE;
 	st->st_blocks = (entry->size + SECTOR_SIZE - 1) / SECTOR_SIZE;
-	st->st_spare4[0] = 0;
-	st->st_spare4[1] = 0;
 }
 
 static int _ISFS_open_r(struct _reent *r, void *fileStruct, const char *path, int flags, int mode) {
@@ -324,10 +323,10 @@ static int _ISFS_open_r(struct _reent *r, void *fileStruct, const char *path, in
 	if (!READ_ONLY && (flags & O_APPEND))
 		ISFS_Seek(file->fd, 0, SEEK_END);
 
-	return (int)file;
+	return 0;
 }
 
-static int _ISFS_close_r(struct _reent *r, int fd) {
+static int _ISFS_close_r(struct _reent *r, void *fd) {
 	FILE_STRUCT *file = (FILE_STRUCT *)fd;
 	if (file->fd < 0) {
 		r->_errno = EBADF;
@@ -343,7 +342,7 @@ static int _ISFS_close_r(struct _reent *r, int fd) {
 	return 0;
 }
 
-static int _ISFS_read_r(struct _reent *r, int fd, char *buf, size_t len) {
+static int _ISFS_read_r(struct _reent *r, void *fd, char *buf, size_t len) {
 	FILE_STRUCT *file = (FILE_STRUCT *)fd;
 	if (file->fd < 0) {
 		r->_errno = EBADF;
@@ -380,7 +379,7 @@ static int _ISFS_read_r(struct _reent *r, int fd, char *buf, size_t len) {
 	return read;
 }
 
-static int _ISFS_write_r(struct _reent *r UNUSED, int fd, const char *buf, size_t len) {
+static int _ISFS_write_r(struct _reent *r UNUSED, void *fd, const char *buf, size_t len) {
 
 	if(READ_ONLY) {
 		r->_errno = EACCES;
@@ -423,7 +422,7 @@ static int _ISFS_write_r(struct _reent *r UNUSED, int fd, const char *buf, size_
 	return wrote;
 }
 
-static off_t _ISFS_seek_r(struct _reent *r, int fd, off_t pos, int dir) {
+static off_t _ISFS_seek_r(struct _reent *r, void *fd, off_t pos, int dir) {
 	FILE_STRUCT *file = (FILE_STRUCT *)fd;
 	if (file->fd < 0) {
 		r->_errno = EBADF;
@@ -444,13 +443,14 @@ static off_t _ISFS_seek_r(struct _reent *r, int fd, off_t pos, int dir) {
 	return ret;
 }
 
-static int _ISFS_fstat_r(struct _reent *r, int fd, struct stat *st) {
+static int _ISFS_fstat_r(struct _reent *r, void *fd, struct stat *st) {
 	FILE_STRUCT *file = (FILE_STRUCT *)fd;
 	if (file->fd < 0) {
 		r->_errno = EBADF;
 		return -1;
 	}
 	time_t t = time(0);
+	memset(st, 0, sizeof(*st));
 	st->st_dev = DEV_ID;
 	st->st_ino = 0;
 	st->st_mode = S_IFREG | (S_IRUSR | S_IRGRP | S_IROTH);
@@ -460,15 +460,13 @@ static int _ISFS_fstat_r(struct _reent *r, int fd, struct stat *st) {
 	st->st_rdev = st->st_dev;
 	st->st_size = file->size;
 	st->st_atime = t;
-	st->st_spare1 = 0;
+
 	st->st_mtime = t;
-	st->st_spare2 = 0;
+
 	st->st_ctime = t;
-	st->st_spare3 = 0;
+
 	st->st_blksize = SECTOR_SIZE;
 	st->st_blocks = (file->size + SECTOR_SIZE - 1) / SECTOR_SIZE;
-	st->st_spare4[0] = 0;
-	st->st_spare4[1] = 0;
 	return 0;
 }
 
@@ -528,6 +526,7 @@ static int _ISFS_stat_r(struct _reent *r, const char *path, struct stat *st) {
 	free(abspath);
 
 	time_t t = time(0);
+	memset(st, 0, sizeof(*st));
 	st->st_dev = DEV_ID;
 	st->st_ino = 0;
 	st->st_mode = (isDir ? S_IFDIR : S_IFREG) | (S_IRUSR | S_IRGRP | S_IROTH);
@@ -537,15 +536,13 @@ static int _ISFS_stat_r(struct _reent *r, const char *path, struct stat *st) {
 	st->st_rdev = st->st_dev;
 	st->st_size = size;
 	st->st_atime = t;
-	st->st_spare1 = 0;
+
 	st->st_mtime = t;
-	st->st_spare2 = 0;
+
 	st->st_ctime = t;
-	st->st_spare3 = 0;
+
 	st->st_blksize = SECTOR_SIZE;
 	st->st_blocks = (size + SECTOR_SIZE - 1) / SECTOR_SIZE;
-	st->st_spare4[0] = 0;
-	st->st_spare4[1] = 0;
 
 	return 0;
 }

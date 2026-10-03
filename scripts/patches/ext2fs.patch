@@ -1,0 +1,94 @@
+--- a/source/ext2file.h
++++ b/source/ext2file.h
+@@ -48,13 +48,13 @@
+ 
+ /* Gekko devoptab file routines for EXT2-based devices */
+ extern int ext2_open_r (struct _reent *r, void *fileStruct, const char *path, int flags, int mode);
+-extern int ext2_close_r (struct _reent *r, int fd);
+-extern ssize_t ext2_write_r (struct _reent *r, int fd, const char *ptr, size_t len);
+-extern ssize_t ext2_read_r (struct _reent *r, int fd, char *ptr, size_t len);
+-extern off_t ext2_seek_r (struct _reent *r, int fd, off_t pos, int dir);
+-extern int ext2_fstat_r (struct _reent *r, int fd, struct stat *st);
+-extern int ext2_ftruncate_r (struct _reent *r, int fd, off_t len);
+-extern int ext2_fsync_r (struct _reent *r, int fd);
++extern int ext2_close_r (struct _reent *r, void *fd);
++extern ssize_t ext2_write_r (struct _reent *r, void *fd, const char *ptr, size_t len);
++extern ssize_t ext2_read_r (struct _reent *r, void *fd, char *ptr, size_t len);
++extern off_t ext2_seek_r (struct _reent *r, void *fd, off_t pos, int dir);
++extern int ext2_fstat_r (struct _reent *r, void *fd, struct stat *st);
++extern int ext2_ftruncate_r (struct _reent *r, void *fd, off_t len);
++extern int ext2_fsync_r (struct _reent *r, void *fd);
+ 
+ #endif /* _EXT2FILE_H */
+ 
+--- a/source/ext2file.c
++++ b/source/ext2file.c
+@@ -177,10 +177,10 @@
+     // Unlock
+     ext2Unlock(file->vd);
+ 
+-    return (int)fileStruct;
+-}
+-
+-int ext2_close_r (struct _reent *r, int fd)
++    return 0;
++}
++
++int ext2_close_r (struct _reent *r, void *fd)
+ {
+     ext2_log_trace("fd %p\n", (void *) fd);
+ 
+@@ -213,7 +213,7 @@
+     return 0;
+ }
+ 
+-ssize_t ext2_write_r (struct _reent *r, int fd, const char *ptr, size_t len)
++ssize_t ext2_write_r (struct _reent *r, void *fd, const char *ptr, size_t len)
+ {
+     ext2_log_trace("fd %p, ptr %p, len %i\n", (void *) fd, ptr, len);
+ 
+@@ -269,7 +269,7 @@
+     return (written == 0 ? -1 : written);
+ }
+ 
+-ssize_t ext2_read_r (struct _reent *r, int fd, char *ptr, size_t len)
++ssize_t ext2_read_r (struct _reent *r, void *fd, char *ptr, size_t len)
+ {
+     ext2_log_trace("fd %p, ptr %p, len %i\n", (void *) fd, ptr, len);
+ 
+@@ -313,7 +313,7 @@
+     return (read == 0) ? -1 : read;
+ }
+ 
+-off_t ext2_seek_r (struct _reent *r, int fd, off_t pos, int dir)
++off_t ext2_seek_r (struct _reent *r, void *fd, off_t pos, int dir)
+ {
+     ext2_log_trace("fd %p, pos %lli, dir %i\n", (void *) fd, pos, dir);
+ 
+@@ -332,7 +332,7 @@
+     return (off_t) pos_loaded;
+ }
+ 
+-int ext2_fstat_r (struct _reent *r, int fd, struct stat *st)
++int ext2_fstat_r (struct _reent *r, void *fd, struct stat *st)
+ {
+     ext2_log_trace("fd %p\n", (void *) fd);
+ 
+@@ -357,7 +357,7 @@
+     return ret;
+ }
+ 
+-int ext2_ftruncate_r (struct _reent *r, int fd, off_t len)
++int ext2_ftruncate_r (struct _reent *r, void *fd, off_t len)
+ {
+     ext2_log_trace("fd %p, len %Li\n", (void *) fd, len);
+ 
+@@ -395,7 +395,7 @@
+     return err;
+ }
+ 
+-int ext2_fsync_r (struct _reent *r, int fd)
++int ext2_fsync_r (struct _reent *r, void *fd)
+ {
+     ext2_log_trace("fd %p\n", (void *) fd);
+ 

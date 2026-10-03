@@ -26,7 +26,8 @@ bool CheckFile(const char * filepath);
 u64 FileSize(const char * filepath);
 int LoadFileToMem(const char * filepath, u8 **buffer, u32 *size);
 int LoadFileToMemWithProgress(const char *progressText, const char *filePath, u8 **buffer, u32 *size);
-int CopyFile(const char * src, const char * dest);
+// Copy/move return 1 when completed, 0 when skipped, or a negative error.
+int CopyFile(const char *src, const char *dest, u32 bufferSize = 128*1024);
 int MoveFile(const char *srcpath, const char *destdir);
 int RemoveDirectory(const char * dirpath);
 bool RenameFile(const char * srcpath, const char * destpath);

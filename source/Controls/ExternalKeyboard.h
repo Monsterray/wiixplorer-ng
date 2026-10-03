@@ -29,8 +29,10 @@ distribution.
 -------------------------------------------------------------*/
 #ifndef EXTERNALKEYBOARD_H_
 #define EXTERNALKEYBOARD_H_
+#include <atomic>
 
 #include <queue>
+#include <atomic>
 #include <gctypes.h>
 #include <wiikeyboard/keyboard.h>
 #include <wiikeyboard/usbkeyboard.h>
@@ -87,8 +89,8 @@ private:
 	CMutex mutex;
 	std::queue<keyboard_event> eventQueue;
 
-	bool bExitRequested;
-	bool bSuspendScan;
+	std::atomic_bool bExitRequested;
+	std::atomic_bool bSuspendScan;
 	int iNewDeviceScanTimer;
 	u16 _modifiers;
 	int _composelen;

@@ -39,6 +39,8 @@ void wiilight(int enable);
 
 bool RebootApp();
 void ExitApp();
+// Called by main after the GUI callback/frame has unwound.
+void Sys_ExecuteExit(void);
 
 void Sys_Init(void);
 void Sys_Reboot(void);

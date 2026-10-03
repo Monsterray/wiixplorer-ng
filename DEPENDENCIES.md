@@ -1,0 +1,79 @@
+# Dependencies and compatibility
+
+The application targets official devkitPro libogc. The installed SDK supplies
+libogc, libfat, libdi, tinysmb, wiikeyboard, Wii input/audio libraries, and modern
+PowerPC portlibs (zlib, PNG, FreeType, Mini-XML, libmad, Brotli, and bzip2).
+FreeType's Brotli/bzip2 transitive dependencies are linked explicitly.
+
+`scripts/build-deps.py` pins every downloaded archive by SHA-256. Source and
+compiled archives remain under ignored `.deps/`. It rebuilds with the current
+PowerPC compiler and applies tracked patches; it never installs old binaries
+into devkitPro. It uses Python's standard library plus curl and patch.
+
+| Ports | Pinned source |
+| --- | --- |
+| JPEG, TIFF, GD, minizip, 7zip, unrar, MuPDF | [Original WiiXplorer source archive](https://storage.googleapis.com/google-code-archive-source/v2/code.google.com/wiixplorer/source-archive.zip), `branches/libs` |
+| NTFS | [libntfs-wii source archive](https://storage.googleapis.com/google-code-archive-source/v2/code.google.com/libntfs-wii/source-archive.zip), `trunk` |
+| EXT | [libext2fs-wii source archive](https://storage.googleapis.com/google-code-archive-source/v2/code.google.com/libext2fs-wii/source-archive.zip), `trunk` |
+| NFS | [libnfs-wii source archive](https://storage.googleapis.com/google-code-archive-source/v2/code.google.com/libnfs-wii/source-archive.zip), `trunk` |
+| Ogg | [Xiph libogg 1.3.6](https://downloads.xiph.org/releases/ogg/libogg-1.3.6.tar.xz) |
+| Tremor | [Xiph Tremor](https://gitlab.xiph.org/xiph/tremor), commit `820fb3237ea81af44c9cc468c8b4e20128e3e5ad` |
+
+These snapshots preserve the original app's APIs and feature set; rebuilding
+historical libraries does not upgrade their security or file-format support.
+Before a release, replace or audit these ports and include their applicable
+license texts. The archives contain their original notices and license files;
+the build helper does not establish a single license covering all dependencies.
+
+Compatibility patches adapt newlib's opaque devoptab file state, zlib's CRC
+types, GC boolean headers, unsupported Wii file locking, and two MuPDF naming
+conflicts. EXT is compiled with `-fgnu89-inline` because its headers use that
+older inline convention. Dependency recipes are invalidated by compiler version,
+script changes, and their patches. Clean dependency work/output after changing
+SDK headers or portlibs. Compilation logs are in `.deps/work/<library>/build.log`.
+
+The tracked `data/binary/magic_patcher.o` and embedded booter binaries are
+inherited upstream artifacts. No matching magic-patcher source was found in the
+archive; that object remains an exception to rebuilding from source. Recovering
+its source and documenting binary/asset redistribution rights are release work.
+
+CI uses [devkitPro's official container](https://github.com/devkitPro/docker),
+[checkout](https://github.com/actions/checkout), and
+[artifact upload](https://github.com/actions/upload-artifact).
+A rolling image checks ongoing toolchain compatibility; release reproducibility
+also requires pinning that image by digest and recording the package versions,
+source checksums, Git revision, build flags, and output hashes.
+
+## HBC-Reborn agent
+
+`scripts/build-hbc-agent.py` pins [HBC-Reborn commit
+3b1e9a4e04fbb1afb98f516a2446ef9789877f8f](https://github.com/Monsterray/hbc-reborn/tree/3b1e9a4e04fbb1afb98f516a2446ef9789877f8f),
+archive SHA-256 `0a62fb10826ea820f820f76925cba79ef78df06f319fb751a9802b0cdba7198b`.
+The SDK builds with official libogc, `-O2 -g`, and its upstream two-slot transfer
+configuration. Source, build and the official host client stay under `.deps/`.
+The tracked `scripts/patches/hbc-agent.patch` adds graceful listener shutdown
+and closes HOME on remote exit. The app reserves the SDK's persistent MEM2
+records and joins the listener before unmounting devices. The network/crash
+features are enabled in debug builds; the HOME overlay is present in both.
+
+Upstream specifies GPL version 2 or later for the agent and public domain for
+`hbc_netlog.h`. Its full GPL text is retained in
+`.deps/prefix/licenses/hbc-agent/COPYING`; include applicable source/notices when
+redistributing. No HBC keys, channel binaries or WADs are required by this build.
+
+Transfer patches additionally validate NFS reply counts and COMMIT/write
+verifiers across a file, correct access flags and bound 32-bit positions.
+HBC-Reborn uploads use checked staged replacement and the app's capacity-polled socket guard;
+framed downloads retain blocking send mode across frames to reduce IOS overhead.
+Accepted agent sockets explicitly enter nonblocking mode before reading request
+headers: POSIX/Dolphin accepted sockets do not inherit the listener's mode.
+See [TRANSFERS.md](TRANSFERS.md) for limits and measured results.
+
+## ftpsrv server core
+
+Four core files are vendored from ITotalJustice/ftpsrv 1.2.2, commit
+`99253bdd62fac99f251f1bf25043afdf3f4b38e7`, under
+`source/FTPOperations/ftpsrv`. No platform app, logger or minIni is imported.
+Its MIT notices, archive hash and complete local patch are recorded in
+[UPSTREAM.md](source/FTPOperations/ftpsrv/UPSTREAM.md). The adapter builds against
+official libogc and DeviceHandler. See [FTP.md](FTP.md).

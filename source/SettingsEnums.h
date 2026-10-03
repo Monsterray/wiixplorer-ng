@@ -70,6 +70,9 @@ typedef struct _FTPData
 typedef struct _FTPServerData
 {
 	short   AutoStart;
+	char    User[50];
+	short   Anonymous;
+	unsigned IdleTimeout;
 	char	Password[50];
 	unsigned short	Port;
 } FTPServerData;

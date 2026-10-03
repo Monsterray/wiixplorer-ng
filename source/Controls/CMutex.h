@@ -36,7 +36,8 @@ public:
 
 	virtual ~CMutex() {
 		if(LWP_MUTEX_NULL != m_mutex) {
-			LWP_MutexUnlock(m_mutex);
+			// Owners must release their locks before destruction. Unlocking an
+			// unowned mutex traps in current libogc and disables interrupts.
 			LWP_MutexDestroy(m_mutex);
 		}
 	}

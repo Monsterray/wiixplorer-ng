@@ -27,6 +27,7 @@
 #define _MUSICPLAYER_H_
 
 #include <vector>
+#include <atomic>
 #include <string>
 #include "GUI/gui_frame.h"
 #include "Controls/CThread.h"
@@ -82,7 +83,7 @@ class MusicPlayer : public GuiFrame, public CThread, public sigslot::has_slots<>
 		bool Stopped;
 		bool bHidden;
 		bool PlaybackFinished;
-		bool ExitRequested;
+		std::atomic_bool ExitRequested;
 
 		std::string loadPathThreaded;
 

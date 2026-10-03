@@ -40,7 +40,7 @@ static bool firstNFSRun = true;
  ****************************************************************************/
 bool ConnectNFS(int client)
 {
-	if(client < 0)
+	if(client < 0 || client >= MAXNFSUSERS)
 		return false;
 
 	if(firstNFSRun)
@@ -61,7 +61,7 @@ bool ConnectNFS(int client)
 
 	char mountname[10];
 
-	sprintf(mountname, "nfs%i", client+1);
+	snprintf(mountname, sizeof(mountname), "nfs%i", client+1);
 
 	if(strcmp(Settings.NFSUser[client].Host, "") != 0)
 	{
@@ -96,7 +96,7 @@ bool ConnectNFS()
  ***************************************************************************/
 bool IsNFS_Mounted(int nfs)
 {
-	if(nfs < 0 || nfs >= MAXSMBUSERS)
+	if(nfs < 0 || nfs >= MAXNFSUSERS)
 		return false;
 
 	return NFS_Mounted[nfs];
@@ -111,7 +111,7 @@ void CloseNFS(int connection)
 		return;
 
 	char mountname[10];
-	sprintf(mountname, "nfs%i", connection+1);
+	snprintf(mountname, sizeof(mountname), "nfs%i", connection+1);
 
 	if(IsNFS_Mounted(connection))
 		nfsUnmount(mountname);

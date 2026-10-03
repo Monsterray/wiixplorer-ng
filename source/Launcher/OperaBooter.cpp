@@ -304,7 +304,7 @@ void OperaBooter::Sort()
 
 bool OperaBooter::SortCallback(const Link & f1, const Link & f2)
 {
-	if(stricmp(f1.name, f2.name) > 0)
+	if(strcasecmp(f1.name, f2.name) > 0)
 		return false;
 	else
 		return true;

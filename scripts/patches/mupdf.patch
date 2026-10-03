@@ -1,0 +1,54 @@
+--- a/source/imagescale.c
++++ b/source/imagescale.c
+@@ -1,4 +1,6 @@
+ #include "fitz.h"
++
++extern void ShowError(const char *format, ...);
+ 
+ typedef unsigned char byte;
+ 
+--- a/source/pdftool.h
++++ b/source/pdftool.h
+@@ -9,7 +9,7 @@
+ #include "fitz.h"
+ #include "mupdf.h"
+ 
+-extern char *basename;
++extern char *pdf_basename;
+ extern pdf_xref *xref;
+ extern int pagecount;
+ 
+--- a/source/pdftool.c
++++ b/source/pdftool.c
+@@ -1,6 +1,6 @@
+ #include "pdftool.h"
+ 
+-char *basename = nil;
++char *pdf_basename = nil;
+ pdf_xref *xref = nil;
+ int pagecount = 0;
+ static void (*cleanup)(void) = nil;
+@@ -26,11 +26,11 @@
+ 	int okay;
+ 	int fd;
+ 
+-	basename = strrchr(filename, '/');
+-	if (!basename)
+-		basename = filename;
++	pdf_basename = strrchr(filename, '/');
++	if (!pdf_basename)
++		pdf_basename = filename;
+ 	else
+-		basename++;
++		pdf_basename++;
+ 
+ 	fd = open(filename, O_BINARY | O_RDONLY, 0666);
+ 	if (fd < 0)
+@@ -73,6 +73,6 @@
+ 		xref = nil;
+ 	}
+ 
+-	basename = nil;
++	pdf_basename = nil;
+ }
+ 

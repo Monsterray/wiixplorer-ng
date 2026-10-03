@@ -14,7 +14,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  ****************************************************************************/
-#include <malloc.h>
+#include "Diagnostics/Probes.h"
 #include "ThreadedTaskHandler.hpp"
 
 ThreadedTaskHandler * ThreadedTaskHandler::instance = NULL;
@@ -23,24 +23,40 @@ ThreadedTaskHandler::ThreadedTaskHandler()
 	: CThread(80, 65*1024)
 	, ExitRequested(false)
 {
+	LWP_SemInit(&wake, 0, 1);
 	startThread();
 }
 
 ThreadedTaskHandler::~ThreadedTaskHandler()
 {
-	ExitRequested = true;
+    ExitRequested = true;
+    LWP_SemPost(wake);
+    shutdownThread(); // Join while the queue and derived vtable still exist.
+    LWP_SemDestroy(wake);
+}
+
+void ThreadedTaskHandler::AddTask(ThreadedTask *task)
+{
+    queueMutex.lock();
+    if (!ExitRequested) TaskList.push(task);
+    queueMutex.unlock();
+    LWP_SemPost(wake);
+    WX_PROBE(THREADS, 1, 1);
 }
 
 void ThreadedTaskHandler::executeThread(void)
 {
-	while(!ExitRequested)
-	{
-		suspendThread();
-
-		while(!ExitRequested && !TaskList.empty())
-		{
-			TaskList.front()->Execute();
-			TaskList.pop();
-		}
-	}
+    while (!ExitRequested) {
+        LWP_SemWait(wake);
+        while (!ExitRequested) {
+            queueMutex.lock();
+            ThreadedTask *task = TaskList.empty() ? NULL : TaskList.front();
+            if (task) TaskList.pop();
+            WX_PROBE(THREADS, 3, TaskList.size());
+            queueMutex.unlock();
+            if (!task) break;
+            WX_SCOPE(THREADS);
+            task->Execute();
+        }
+    }
 }

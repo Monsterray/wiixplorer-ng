@@ -50,9 +50,8 @@ void DeleteTask::Execute(void)
 
 	int result = 0;
 
-	if(GetItemList(itemList, true) < 0) {
-		result = -1;
-	}
+    int planned = GetItemList(itemList, true);
+    if (planned < 0) result = planned;
 
 	ProgressWindow::Instance()->SetTitle(this->getTitle().c_str());
 	ProgressWindow::Instance()->SetCompleteValues(0, -1);

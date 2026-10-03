@@ -78,7 +78,10 @@ private:
 	static void *threadCallback(void *arg)
 	{
 		//! Initially start/hook thread point, stop here
-		((CThread *) arg)->suspendThread();
+		// The new thread may run before LWP_CreateThread publishes its handle.
+        // Suspend this thread directly, without reading the owner or dispatching
+        // a virtual method while the derived object is still being constructed.
+        LWP_SuspendThread(LWP_GetSelf());
 		//! After call to start() continue with the internal function
 		((CThread *) arg)->executeThread();
 		return NULL;

@@ -56,10 +56,13 @@ void MoveTask::Execute(void)
 	//! On same device we move files instead of copy them
 	for(int i = 0; i < Process.GetItemcount(); ++i)
 	{
+        if (ProgressWindow::Instance()->IsCanceled() || Application::isClosing()) {
+            TaskEnd(this); return;
+        }
 		if(CompareDevices(Process.GetItemPath(i), destPathSlash.c_str()))
 		{
 			string srcpath = Process.GetItemPath(i);
-			while(srcpath[srcpath.size()-1] == '/')
+			while(!srcpath.empty() && srcpath[srcpath.size()-1] == '/')
 				srcpath.erase(srcpath.size()-1);
 
 			const char *pathname = strrchr(srcpath.c_str(), '/');
@@ -92,9 +95,8 @@ void MoveTask::Execute(void)
 
 	list<ItemList> itemList;
 
-	if(GetItemList(itemList, true) < 0) {
-		result = -1;
-	}
+    int planned = GetItemList(itemList, true);
+    if (planned < 0) result = planned;
 
 	//! free memory of process which is no longer required
 	Process.Reset();
@@ -107,7 +109,7 @@ void MoveTask::Execute(void)
 		//! first move/remove all files in all sub directories
 		for(list<string>::iterator itr = listItr->files.begin(); itr != listItr->files.end(); itr++)
 		{
-			if(ProgressWindow::Instance()->IsCanceled())
+			if(ProgressWindow::Instance()->IsCanceled() || Application::isClosing())
 				break;
 
 			string srcpath = listItr->basepath + *itr;
@@ -128,13 +130,16 @@ void MoveTask::Execute(void)
 		//! Remove all dirs reversed as they were appended to the list
 		for(list<string>::iterator itr = listItr->dirs.begin(); itr != listItr->dirs.end(); itr++)
 		{
-			if(ProgressWindow::Instance()->IsCanceled())
+			if(ProgressWindow::Instance()->IsCanceled() || Application::isClosing())
 				break;
 
-			RemoveFile((listItr->basepath + *itr).c_str());
+            // Preserve empty directories, and never remove their source if
+            // the corresponding destination could not be created.
+            if (!CreateSubfolder((destPathSlash+*itr).c_str()) ||
+                !RemoveFile((listItr->basepath+*itr).c_str())) result = -1;
 		}
 
-		if(ProgressWindow::Instance()->IsCanceled())
+		if(ProgressWindow::Instance()->IsCanceled() || Application::isClosing())
 		{
 			result = PROGRESS_CANCELED;
 			break;

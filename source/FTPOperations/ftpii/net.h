@@ -40,6 +40,9 @@ s32 net_close_blocking(s32 s);
 
 s32 create_server(u16 port);
 
+s32 init_ftp_buffers(void);
+void cleanup_ftp_buffers(void);
+
 s32 send_exact(s32 s, char *buf, s32 length);
 
 s32 send_from_file(s32 s, FILE *f);

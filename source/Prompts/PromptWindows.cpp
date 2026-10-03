@@ -37,7 +37,6 @@
 #include "Tools/StringTools.h"
 #include "TextOperations/wstring.hpp"
 #include "sys.h"
-#include "svnrev.h"
 
 /**************************************************************************
 * OnScreenKeyboard for unicode string
@@ -52,7 +51,7 @@ int OnScreenKeyboard(wchar_t * var, u16 maxlen)
 	Application::Instance()->Append(keyboard);
 	Application::Instance()->SetUpdateOnly(keyboard);
 
-	while((save = keyboard->GetChoice()) < 0)
+	while(!Application::isClosing() && (save = keyboard->GetChoice()) < 0)
 	{
 		Application::Instance()->updateEvents();
 	}
@@ -60,7 +59,7 @@ int OnScreenKeyboard(wchar_t * var, u16 maxlen)
 	Application::Instance()->PushForDelete(keyboard);
 	Application::Instance()->updateEvents();
 
-	return save;
+	return Application::isClosing() ? 0 : save;
 }
 
 /**************************************************************************
@@ -86,7 +85,7 @@ int OnScreenKeyboard(char * var, u16 maxlen)
 
 	delete [] wtext;
 
-	return save;
+	return Application::isClosing() ? 0 : save;
 }
 
 /****************************************************************************
@@ -110,7 +109,7 @@ bool NetworkInitPrompt()
 		ResumeNetworkThread();
 	}
 
-	while((choice = Prompt->GetChoice()) < 0 && !IsNetworkInit())
+	while(!Application::isClosing() && (choice = Prompt->GetChoice()) < 0 && !IsNetworkInit())
 	{
 		Application::Instance()->updateEvents();
 	}
@@ -119,6 +118,7 @@ bool NetworkInitPrompt()
 	Application::Instance()->PushForDelete(Prompt);
 	Application::Instance()->updateEvents();
 
+	if (Application::isClosing()) return false;
 	if(!IsNetworkInit())
 	{
 		ShowError(tr("No network connection."));
@@ -144,7 +144,7 @@ int WindowPrompt(const char *title, const char *msg,
 	Application::Instance()->Append(Prompt);
 	Application::Instance()->SetUpdateOnly(Prompt);
 
-	while((choice = Prompt->GetChoice()) < 0)
+	while(!Application::isClosing() && (choice = Prompt->GetChoice()) < 0)
 	{
 		Application::Instance()->updateEvents();
 	}
@@ -157,5 +157,5 @@ int WindowPrompt(const char *title, const char *msg,
 	//! follow up updates, prevent that by reupdating the pads with one event
 	Application::Instance()->updateEvents();
 
-	return choice;
+	return Application::isClosing() ? 0 : choice;
 }

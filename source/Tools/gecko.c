@@ -9,7 +9,7 @@
 
 static bool geckoinit = false;
 
-static ssize_t __out_write(struct _reent *r UNUSED, int fd UNUSED, const char *ptr, size_t len)
+static ssize_t __out_write(struct _reent *r UNUSED, void *fd UNUSED, const char *ptr, size_t len)
 {
 	if(geckoinit && ptr)
 	{

@@ -34,8 +34,10 @@
 
 SoundHandler * SoundHandler::instance = NULL;
 
-SoundHandler::SoundHandler()
+SoundHandler::SoundHandler() : decoderMutex(true)
 {
+	SoundThread = LWP_THREAD_NULL;
+	LWP_SemInit(&ThreadWake, 0, 1);
 	Decoding = false;
 	ExitRequested = false;
 	for(u32 i = 0; i < MAX_DECODERS; ++i)
@@ -52,7 +54,8 @@ SoundHandler::~SoundHandler()
 {
 	ExitRequested = true;
 	ThreadSignal();
-	LWP_JoinThread(SoundThread, NULL);
+	if (SoundThread != LWP_THREAD_NULL) LWP_JoinThread(SoundThread, NULL);
+	LWP_SemDestroy(ThreadWake);
 	SoundThread = LWP_THREAD_NULL;
 	if(ThreadStack)
 		free(ThreadStack);
@@ -65,10 +68,12 @@ void SoundHandler::AddDecoder(int voice, const char * filepath)
 	if(voice < 0 || voice >= MAX_DECODERS)
 		return;
 
+	decoderMutex.lock();
 	if(DecoderList[voice] != NULL)
 		RemoveDecoder(voice);
 
 	DecoderList[voice] = GetSoundDecoder(filepath);
+	decoderMutex.unlock();
 }
 
 void SoundHandler::AddDecoder(int voice, const u8 * snd, int len)
@@ -76,10 +81,12 @@ void SoundHandler::AddDecoder(int voice, const u8 * snd, int len)
 	if(voice < 0 || voice >= MAX_DECODERS)
 		return;
 
+	decoderMutex.lock();
 	if(DecoderList[voice] != NULL)
 		RemoveDecoder(voice);
 
 	DecoderList[voice] = GetSoundDecoder(snd, len);
+	decoderMutex.unlock();
 }
 
 void SoundHandler::RemoveDecoder(int voice)
@@ -87,10 +94,12 @@ void SoundHandler::RemoveDecoder(int voice)
 	if(voice < 0 || voice >= MAX_DECODERS)
 		return;
 
+	decoderMutex.lock();
 	if(DecoderList[voice] != NULL)
 		delete DecoderList[voice];
 
 	DecoderList[voice] = NULL;
+	decoderMutex.unlock();
 }
 
 void SoundHandler::ClearDecoderList()
@@ -226,11 +235,13 @@ void * SoundHandler::UpdateThread(void *arg)
 void SoundHandler::InternalSoundUpdates()
 {
 	u16 i = 0;
-	LWP_InitQueue(&ThreadQueue);
+
 	while (!ExitRequested)
 	{
-		LWP_ThreadSleep(ThreadQueue);
+		LWP_SemWait(ThreadWake);
+		if (ExitRequested) break;
 
+		decoderMutex.lock();
 		for(i = 0; i < MAX_DECODERS; ++i)
 		{
 			if(DecoderList[i] == NULL)
@@ -240,7 +251,7 @@ void SoundHandler::InternalSoundUpdates()
 			DecoderList[i]->Decode();
 		}
 		Decoding = false;
+		decoderMutex.unlock();
 	}
-	LWP_CloseQueue(ThreadQueue);
-	ThreadQueue = LWP_TQUEUE_NULL;
+
 }

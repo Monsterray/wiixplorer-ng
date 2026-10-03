@@ -110,6 +110,9 @@ void CSettings::SetDefault()
 	}
 
 	FTPServer.AutoStart = 0;
+	strcpy(FTPServer.User, "wiixplorer");
+	FTPServer.Anonymous = 0;
+	FTPServer.IdleTimeout = 300;
 	strcpy(FTPServer.Password, "");
 	FTPServer.Port = 21;
 
@@ -162,7 +165,6 @@ bool CSettings::Save()
 	FILE *file = fopen(ConfigPath, "w");
 	if(!file)
 	{
-		fclose(file);
 		return false;
 	}
 
@@ -266,6 +268,9 @@ bool CSettings::Save()
 
 	fprintf(file, "\n# FTP Server Setup Information\n\n");
 	fprintf(file, "FTPServer.AutoStart = %d\n", FTPServer.AutoStart);
+	fprintf(file, "FTPServer.User = %s\n", FTPServer.User);
+	fprintf(file, "FTPServer.Anonymous = %d\n", FTPServer.Anonymous);
+	fprintf(file, "FTPServer.IdleTimeout = %u\n", FTPServer.IdleTimeout);
 	password[0] = 0;
 	if (strcmp(FTPServer.Password, "") != 0)
 		EncryptString(FTPServer.Password, password);
@@ -279,11 +284,9 @@ bool CSettings::Save()
 	}
 
 
-	fclose(file);
-
-	Controls.Save();
-
-	return true;
+	bool saved = !ferror(file);
+	if (fclose(file)) saved = false;
+	return Controls.Save() && saved;
 }
 
 bool CSettings::FindConfig()
@@ -765,7 +768,20 @@ bool CSettings::SetSetting(char *name, char *value)
 	else if (strcmp(name, "FTPServer.CPassword") == 0) {
 		if (strcmp(value, "") != 0)
 			DecryptString(value, password);
-		strncpy(FTPServer.Password, ((strcmp(value, "") != 0) ? password : value), sizeof(FTPServer.Password));
+		snprintf(FTPServer.Password, sizeof(FTPServer.Password), "%s", value[0] ? password : "");
+		return true;
+	}
+	else if (strcmp(name, "FTPServer.User") == 0) {
+		snprintf(FTPServer.User, sizeof(FTPServer.User), "%s", value);
+		return true;
+	}
+	else if (strcmp(name, "FTPServer.Anonymous") == 0) {
+		FTPServer.Anonymous = atoi(value) != 0;
+		return true;
+	}
+	else if (strcmp(name, "FTPServer.IdleTimeout") == 0) {
+		unsigned seconds = (unsigned)atoi(value);
+		FTPServer.IdleTimeout = seconds >= 1 && seconds <= 86400 ? seconds : 300;
 		return true;
 	}
 	else if (strcmp(name, "FTPServer.Port") == 0) {

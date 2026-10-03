@@ -27,7 +27,7 @@
  ***************************************************************************/
 
 #include "Resources.h"
-#include "filelist.h"
+#include <Memory/filelist.h>
 
 Resources * Resources::instance = NULL;
 

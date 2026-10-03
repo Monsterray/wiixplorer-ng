@@ -154,6 +154,7 @@ class PartitionHandle
 		PartitionFS * GetPartitionRecord(int pos) { if(valid(pos)) return &PartitionList[pos]; else return NULL; };
 		//! Get the disc interface of this handle
 		const DISC_INTERFACE * GetDiscInterface() { return interface; };
+		u32 GetSectorSize() const { return sectorSize; }
 		static int CheckSectorSize(const DISC_INTERFACE* interace);
 	protected:
 		bool valid(int pos) { return (pos >= 0 && pos < (int) PartitionList.size()); }

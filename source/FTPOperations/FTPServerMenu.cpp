@@ -163,8 +163,8 @@ void FTPServerMenu::OnButtonClick(GuiButton *sender, int pointer UNUSED, const P
 		}
 		else
 		{
-			MainFTPBtnTxt->SetText(tr("Shutdown FTP"));
 			FTPServer::Instance()->StartupFTP();
+			MainFTPBtnTxt->SetText(FTPServer::Instance()->isRunning() ? tr("Shutdown FTP") : tr("Startup FTP"));
 		}
 	}
 }

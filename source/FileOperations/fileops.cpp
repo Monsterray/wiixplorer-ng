@@ -1,3 +1,5 @@
+#include "TransferFile.h"
+#include "Diagnostics/Probes.h"
 /****************************************************************************
  * Copyright (C) 2009-2011 Dimok
  *
@@ -54,7 +56,7 @@ static int GetReplaceChoice(const char * filename)
 
 	int choice;
 
-	while((choice = window->GetChoice()) == -1)
+	while((choice = window->GetChoice()) == -1 && !Application::isClosing())
 		usleep(10000);
 
 	window->SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 50);
@@ -152,12 +154,15 @@ u64 FileSize(const char * filepath)
  ***************************************************************************/
 int LoadFileToMem(const char *filepath, u8 **inbuffer, u32 *size)
 {
-	if(!filepath)
+	if(!filepath || !inbuffer || !size)
 		return -1;
 
 	int ret = -1;
-	u32 filesize = FileSize(filepath);
-	char * filename = strrchr(filepath, '/');
+	*inbuffer = NULL; *size = 0;
+	u64 fileLength = FileSize(filepath);
+	if (fileLength > 32*1024*1024) return -2;
+	u32 filesize = fileLength;
+	const char * filename = strrchr(filepath, '/');
 	if(filename)
 		filename++;
 
@@ -168,7 +173,7 @@ int LoadFileToMem(const char *filepath, u8 **inbuffer, u32 *size)
 	if (file == NULL)
 		return -1;
 
-	u8 *buffer = (u8 *) malloc(filesize);
+	u8 *buffer = (u8 *) malloc(filesize ? filesize : 1);
 	if (buffer == NULL)
 	{
 		fclose(file);
@@ -193,7 +198,7 @@ int LoadFileToMem(const char *filepath, u8 **inbuffer, u32 *size)
 		ShowProgress(done, filesize, filename);
 
 		ret = fread(buffer+done, 1, blocksize, file);
-		if(ret < 0)
+		if(ferror(file))
 		{
 			free(buffer);
 			fclose(file);
@@ -205,7 +210,7 @@ int LoadFileToMem(const char *filepath, u8 **inbuffer, u32 *size)
 	}
 	while(ret > 0);
 
-	fclose(file);
+	int closeResult = fclose(file);
 
 	// update at 100% once
 	ShowProgress(done, filesize, filename);
@@ -213,7 +218,7 @@ int LoadFileToMem(const char *filepath, u8 **inbuffer, u32 *size)
 	// finish up the progress for this file
 	FinishProgress(filesize);
 
-	if (done != filesize)
+	if (done != filesize || closeResult != 0)
 	{
 		free(buffer);
 		return -3;
@@ -258,8 +263,12 @@ int LoadFileToMemWithProgress(const char *progressText, const char *filepath, u8
  ***************************************************************************/
 bool CreateSubfolder(const char * fullpath)
 {
-	if(!fullpath)
-		return false;
+    if (!fullpath || Application::isClosing()) return false;
+    size_t boundedLength = strnlen(fullpath, 1024);
+    if (!boundedLength || boundedLength >= 1024) return false;
+    unsigned components = 0;
+    for (const char *p=fullpath; *p; ++p)
+        if (*p == '/' && ++components > 64) return false;
 
 	//! make copy of string
 	int length = strlen(fullpath);
@@ -282,17 +291,19 @@ bool CreateSubfolder(const char * fullpath)
 		strcat(dirpath, "/");
 
 	int ret;
+    bool isDirectory = false;
 	//! clear stack when done as this is recursive
 	{
 		struct stat filestat;
 		ret = stat(dirpath, &filestat);
+        isDirectory = ret == 0 && S_ISDIR(filestat.st_mode);
 	}
 
 	//! entry found
 	if(ret == 0)
 	{
 		free(dirpath);
-		return true;
+		return isDirectory;
 	}
 	//! if its root and stat failed the device doesnt exist
 	else if(!notRoot)
@@ -325,14 +336,17 @@ bool CreateSubfolder(const char * fullpath)
  *
  * Copy the file from source filepath to destination filepath
  ***************************************************************************/
-int CopyFile(const char * src, const char * dest)
+int CopyFile(const char * src, const char * dest, u32 bufferSize)
 {
+	if (!src || !dest || !strcasecmp(src, dest) || bufferSize < 16 || bufferSize > 256*1024) return -1;
+	WX_SCOPE(IO);
+	WX_PROBE(IO, 1, 1);
 	u32 read;
 	u32 wrote;
 
 	u64 sizesrc = FileSize(src);
 
-	char * filename = strrchr(src, '/');
+	const char * filename = strrchr(src, '/');
 	if(filename)
 		filename++;
 	else
@@ -346,11 +360,12 @@ int CopyFile(const char * src, const char * dest)
 		if(!replaceall && !replacenone)
 			choice = GetReplaceChoice(filename);
 
+		if (choice == -1 && Application::isClosing()) return PROGRESS_CANCELED;
 		if(replacenone || choice == 2) {
 			ShowProgress(0, sizesrc, filename);
 			// finish up the progress for this file
 			FinishProgress(sizesrc);
-			return 1;
+			return 0;
 		}
 	}
 
@@ -359,9 +374,12 @@ int CopyFile(const char * src, const char * dest)
 	if(!source)
 		return -2;
 
-	u32 blksize = BLOCKSIZE;
+	u32 blksize = bufferSize;
 
 	u8 * buffer = (u8 *) memalign(32, blksize);
+	while (!buffer && blksize > 32*1024) {
+		blksize /= 2; buffer = (u8 *)memalign(32, blksize);
+	}
 
 	if(buffer == NULL){
 		//no memory
@@ -369,10 +387,15 @@ int CopyFile(const char * src, const char * dest)
 		return -1;
 	}
 
-	FILE * destination = fopen(dest, "wb");
+	wx_transfer_file transfer;
+	if (wx_transfer_begin(&transfer, dest) != 0) {
+		free(buffer); fclose(source); return -3;
+	}
+	FILE * destination = fopen(transfer.staged, "wb");
 
 	if(destination == NULL)
 	{
+		wx_transfer_abort(&transfer);
 		free(buffer);
 		fclose(source);
 		return -3;
@@ -392,6 +415,7 @@ int CopyFile(const char * src, const char * dest)
 		if(read != blksize)
 			break;
 
+		WX_PROBE(IO, 3, read);
 		wrote = fwrite(buffer, 1, read, destination);
 		if(wrote != read)
 			break;
@@ -403,24 +427,30 @@ int CopyFile(const char * src, const char * dest)
 	}
 	while (read > 0);
 
+	int sourceError = ferror(source);
+	if (done == sizesrc && fgetc(source) != EOF) sourceError = 1;
+	if (ferror(source)) sourceError = 1;
 	free(buffer);
-	fclose(source);
-	fclose(destination);
+	if (fclose(source) != 0) sourceError = 1;
+	int closeResult = fclose(destination);
 
 	// finish up the progress for this file
 	FinishProgress(sizesrc);
 
 	if(ProgressWindow::Instance()->IsCanceled())
 	{
-		RemoveFile(dest);
+		wx_transfer_abort(&transfer);
 		return PROGRESS_CANCELED;
 	}
-	else if(sizesrc != done)
+	else if(sizesrc != done || closeResult != 0 || sourceError)
 	{
-		RemoveFile(dest);
+		wx_transfer_abort(&transfer);
 		return -4;
 	}
 
+	if (wx_transfer_publish(&transfer, transfer.staged, dest) != 0) {
+		wx_transfer_abort(&transfer); return -4;
+	}
 	return 1;
 }
 
@@ -431,6 +461,7 @@ int CopyFile(const char * src, const char * dest)
  ***************************************************************************/
 int MoveFile(const char *srcpath, const char *destdir)
 {
+	if (!srcpath || !destdir || !strcasecmp(srcpath, destdir)) return -1;
 	if(CompareDevices(srcpath, destdir))
 	{
 		const char * filename = strrchr(destdir, '/');
@@ -442,28 +473,30 @@ int MoveFile(const char *srcpath, const char *destdir)
 				choice = GetReplaceChoice(filename ? filename+1 : destdir);
 
 
+			if (choice == -1 && Application::isClosing()) return PROGRESS_CANCELED;
 			if(replacenone || choice == 2)
 			{
 				//Display progress
 				ShowProgress(0, 1,filename);
 				FinishProgress(1);
-				return 1;
+				return 0;
 			}
 
-			else if(replaceall || choice == 1)
-				RemoveFile(destdir);
 		}
 		//Display progress
 		ShowProgress(0, 1,filename);
 		FinishProgress(1);
 
-		if(RenameFile(srcpath, destdir))
-			return 1;
+		wx_transfer_file transfer;
+		if (wx_transfer_begin(&transfer, destdir) != 0) return -1;
+		int result = wx_transfer_publish(&transfer, srcpath, destdir);
+		wx_transfer_abort(&transfer);
+		if (result == 0) return 1;
 	}
 	else
 	{
 		int res = CopyFile(srcpath, destdir);
-		if(res < 0)
+		if(res <= 0)
 			return res;
 
 		if(RemoveFile(srcpath))

@@ -27,8 +27,11 @@
 #define SOUNDHANDLER_H_
 
 #include <vector>
+#include <atomic>
+#include <ogc/semaphore.h>
 #include <gccore.h>
 #include "SoundDecoder.hpp"
+#include "Controls/CMutex.h"
 
 #define MAX_DECODERS	16
 
@@ -45,7 +48,7 @@ public:
 	void DestroyDecoder(SoundDecoder * decoder);
 
 	SoundDecoder * Decoder(int i) { return ((i < 0 || i >= MAX_DECODERS) ? NULL : DecoderList[i]); };
-	void ThreadSignal() { LWP_ThreadSignal(ThreadQueue); };
+	void ThreadSignal() { LWP_SemPost(ThreadWake); };
 	bool IsDecoding() { return Decoding; };
 protected:
 	SoundHandler();
@@ -59,11 +62,12 @@ protected:
 	static SoundHandler * instance;
 	u8 * ThreadStack;
 	lwp_t SoundThread;
-	lwpq_t ThreadQueue;
-	bool Decoding;
-	bool ExitRequested;
+	sem_t ThreadWake;
+	std::atomic_bool Decoding;
+	std::atomic_bool ExitRequested;
 
 	SoundDecoder * DecoderList[MAX_DECODERS];
+	CMutex decoderMutex;
 };
 
 #endif

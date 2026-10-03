@@ -66,10 +66,10 @@ bool ConnectSMBShare(int client)
 
 	//don't let tinysmb modify the settings strings
 	sprintf(mountname, "smb%i", client+1);
-	strcpy(Host, Settings.SMBUser[client].Host);
-	strcpy(User, Settings.SMBUser[client].User);
-	strcpy(Password, Settings.SMBUser[client].Password);
-	strcpy(SMBName, Settings.SMBUser[client].SMBName);
+	snprintf(Host, sizeof(Host), "%s", Settings.SMBUser[client].Host);
+	snprintf(User, sizeof(User), "%s", Settings.SMBUser[client].User);
+	snprintf(Password, sizeof(Password), "%s", Settings.SMBUser[client].Password);
+	snprintf(SMBName, sizeof(SMBName), "%s", Settings.SMBUser[client].SMBName);
 
 	if(strcmp(Host, "") != 0)
 	{

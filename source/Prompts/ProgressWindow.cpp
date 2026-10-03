@@ -430,3 +430,8 @@ void ProgressWindow::OnCancelClick(GuiButton *sender UNUSED, int pointer UNUSED,
 	CloseRequest = true;
 	Canceled = true;
 }
+
+bool ProgressWindow::IsCanceled() const
+{
+	return Canceled || Application::isClosing();
+}

@@ -23,6 +23,7 @@ void *MEM2_realloc(void *p, unsigned int s);
 void MEM2_free(void *p);
 unsigned int MEM2_usableSize(void *p);
 unsigned int MEM2_freesize();
+bool MEM2_check();
 
 #ifdef __cplusplus
 }

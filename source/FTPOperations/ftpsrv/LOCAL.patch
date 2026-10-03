@@ -1,0 +1,325 @@
+--- a/ftpsrv.c
++++ b/ftpsrv.c
+@@ -2,6 +2,7 @@
+  * Copyright 2024 TotalJustice.
+  * SPDX-License-Identifier: MIT
+  */
++#include "../FtpsrvConfig.h"
+ #include "ftpsrv.h"
+ #include "ftpsrv_vfs.h"
+ #include "ftpsrv_socket.h"
+@@ -118,6 +119,7 @@
+     size_t offset;
+     size_t size; // only set during RETR, LIST and NLIST.
+     size_t index; // only used for NLIST and LIST devices.
++    time_t started;
+ 
+     struct FtpVfsFile file_vfs;
+     struct FtpVfsDir dir_vfs;
+@@ -140,6 +142,8 @@
+     struct FtpSocket pasv_sock;    // socket for PASV listen fd
+ 
+     struct sockaddr_in control_sockaddr;
++    struct sockaddr_in peer_sockaddr;
++    bool anonymous;
+     struct sockaddr_in data_sockaddr;
+     struct sockaddr_in pasv_sockaddr;
+ 
+@@ -177,7 +181,9 @@
+     struct FtpSrvConfig cfg;
+ };
+ 
+-static struct Ftp g_ftp = {0};
++/* WiiXplorer local change: disabled FTP retains only this null pointer. */
++static struct Ftp *ftp_state;
++#define g_ftp (*ftp_state)
+ 
+ #if !HAVE_STRNCASECMP
+ static int strncasecmp(const char* a, const char* b, size_t len) {
+@@ -548,6 +554,8 @@
+                 ftp_client_msg(session, 425, "Can't open data connection, [poll] %d %s.", errno, strerror(errno));
+                 ftp_data_transfer_end(session);
+             }
++        } else if (session->pasv_sockaddr.sin_addr.s_addr != session->peer_sockaddr.sin_addr.s_addr) {
++            ftp_socket_close(&session->data_sock);
+         } else {
+             ftp_set_data_socket_options(&session->data_sock);
+             session->transfer.connection_pending = false;
+@@ -571,6 +579,7 @@
+         ftp_data_transfer_end(session);
+     } else {
+         session->transfer.mode = mode;
++        session->transfer.started = time(NULL);
+         session->transfer.index = 0;
+         session->transfer.connection_pending = true;
+ 
+@@ -583,6 +592,7 @@
+     // send as much data as possible.
+     if (transfer->size) {
+         const int n = ftp_socket_send(&session->data_sock, transfer->list_buf + transfer->offset, transfer->size, 0);
++        if (n > 0) ftp_update_session_time(session);
+         if (n < 0) {
+             // check if it failed due to anything but blocking.
+             if (errno != EWOULDBLOCK && errno != EAGAIN) {
+@@ -607,10 +617,10 @@
+         }
+     } else {
+         // parse the next file.
+-        static struct FtpVfsDirEntry entry;
++        struct FtpVfsDirEntry entry;
+         const char* name = ftp_vfs_readdir(&transfer->dir_vfs, &entry);
+         if (!name) {
+-            return FTP_FILE_TRANSFER_STATE_FINISHED;
++            return errno ? FTP_FILE_TRANSFER_STATE_ERROR : FTP_FILE_TRANSFER_STATE_FINISHED;
+         }
+ 
+         if (!strcmp(".", name) || !strcmp("..", name)) {
+@@ -651,16 +661,17 @@
+     int n;
+ 
+     if (transfer->mode == FTP_TRANSFER_MODE_RETR) {
+-        const int read = n = ftp_vfs_read(&transfer->file_vfs, g_ftp.data_buf, sizeof(g_ftp.data_buf));
++        const int read = n = ftp_vfs_read(&transfer->file_vfs, g_ftp.data_buf, FTP_SEND_BLOCK_SIZE);
+         if (n < 0) {
+             return FTP_FILE_TRANSFER_STATE_ERROR;
+         } else if (n == 0) {
+             return FTP_FILE_TRANSFER_STATE_FINISHED;
+         } else {
+             n = ftp_socket_send(&session->data_sock, g_ftp.data_buf, n, 0);
++            if (n > 0) ftp_update_session_time(session);
+             if (n < 0) {
+                 if (errno == EWOULDBLOCK || errno == EAGAIN) {
+-                    ftp_vfs_seek(&transfer->file_vfs, g_ftp.data_buf, 0, transfer->offset);
++                    if (ftp_vfs_seek(&transfer->file_vfs, g_ftp.data_buf, 0, transfer->offset)) return FTP_FILE_TRANSFER_STATE_ERROR;
+                     return FTP_FILE_TRANSFER_STATE_BLOCKING;
+                 } else {
+                     return FTP_FILE_TRANSFER_STATE_ERROR;
+@@ -668,7 +679,7 @@
+             } else {
+                 transfer->offset += (size_t)n;
+                 if (n != read) {
+-                    ftp_vfs_seek(&transfer->file_vfs, g_ftp.data_buf, n, transfer->offset);
++                    if (ftp_vfs_seek(&transfer->file_vfs, g_ftp.data_buf, n, transfer->offset)) return FTP_FILE_TRANSFER_STATE_ERROR;
+                     return FTP_FILE_TRANSFER_STATE_BLOCKING;
+                 }
+             }
+@@ -684,11 +695,13 @@
+         } else if (n == 0) {
+             return FTP_FILE_TRANSFER_STATE_FINISHED;
+         } else {
++            const int received = n;
+             n = ftp_vfs_write(&transfer->file_vfs, g_ftp.data_buf, n);
+-            if (n < 0) {
++            if (n != received) {
+                 return FTP_FILE_TRANSFER_STATE_ERROR;
+             } else {
+                 transfer->offset += n;
++                ftp_update_session_time(session);
+             }
+         }
+     }
+@@ -722,27 +735,27 @@
+         ftp_client_msg(session, 426, "Connection closed; transfer aborted, %s", strerror(errno));
+         ftp_data_transfer_end(session);
+     } else if (state == FTP_FILE_TRANSFER_STATE_FINISHED) {
+-        ftp_client_msg(session, 226, "Closing data connection.");
++        int closed = ftp_vfs_finish(&transfer->file_vfs, 1);
++        if (ftp_vfs_closedir(&transfer->dir_vfs)) closed = -1;
+         ftp_data_transfer_end(session);
+-    }
+-
+-    ftp_update_session_time(session);
++        ftp_client_msg(session, closed ? 451 : 226, closed ? "File completion failed." : "Closing data connection.");
++    }
++
+ }
+ 
+ // USER <SP> <username> <CRLF> | 230, 530, 500, 501, 421, 331, 332
+ static void ftp_cmd_USER(struct FtpSession* session, const char* data) {
++    session->auth_mode = FTP_AUTH_MODE_NONE;
++    session->anonymous = false;
+     char username[128] = {0};
+     int rc = snprintf(username, sizeof(username), "%s", data);
+ 
+     if (rc <= 0 || rc >= sizeof(username)) {
+         ftp_client_msg(session, 501, "Syntax error in parameters or arguments.");
+-    } else if (g_ftp.cfg.anon) {
+-        if (strcmp(username, "anonymous")) {
+-            ftp_client_msg(session, 530, "Not logged in.");
+-        } else {
+-            session->auth_mode = FTP_AUTH_MODE_VALID;
+-            ftp_client_msg(session, 230, "User logged in, proceed.");
+-        }
++    } else if (g_ftp.cfg.anon && !strcmp(username, "anonymous")) {
++        session->anonymous = true;
++        session->auth_mode = FTP_AUTH_MODE_VALID;
++        ftp_client_msg(session, 230, "User logged in, proceed.");
+     } else if (strcmp(username, g_ftp.cfg.user)) {
+         ftp_client_msg(session, 530, "Not logged in.");
+     } else {
+@@ -841,7 +854,7 @@
+     for (int i = 0; i < 6; i++) {
+         char* end_ptr;
+         const unsigned long value = strtoul(data, &end_ptr, 10);
+-        if ((!value && data == end_ptr) || value > 255) {
++        if (data == end_ptr || value > 255 || (i < 5 ? *end_ptr != ',' : *end_ptr != 0)) {
+             ftp_client_msg(session, 501, "Syntax error in parameters or arguments.");
+             return;
+         }
+@@ -861,8 +874,8 @@
+         ftp_client_msg(session, 501, "Syntax error in parameters or arguments, %s.", strerror(errno));
+     } else {
+         rc = inet_aton(ip_buf, &session->data_sockaddr.sin_addr);
+-        if (rc < 0) {
+-            ftp_client_msg(session, 501, "Syntax error in parameters or arguments, %s.", strerror(errno));
++        if (!rc || session->data_sockaddr.sin_addr.s_addr != session->peer_sockaddr.sin_addr.s_addr || !(h[4] || h[5])) {
++            ftp_client_msg(session, 501, "Invalid data peer.");
+         } else {
+             session->data_sockaddr.sin_family = PF_INET;
+             session->data_sockaddr.sin_port = htons((h[4] << 8) + h[5]);
+@@ -1024,9 +1037,10 @@
+ // REST <SP> <marker> <CRLF> | 500, 501, 502, 421, 530, 350
+ static void ftp_cmd_REST(struct FtpSession* session, const char* data) {
+     char* end_ptr;
++    errno = 0;
+     const size_t server_marker = strtoul(data, &end_ptr, 10);
+ 
+-    if ((!server_marker && data == end_ptr) || server_marker == (size_t)-1) {
++    if (data == end_ptr || *end_ptr || data[0] == '-' || data[0] == '+' || errno == ERANGE || server_marker > 0x7fffffffUL) {
+         ftp_client_msg(session, 501, "Syntax error in parameters or arguments.");
+     } else {
+         session->server_marker = server_marker;
+@@ -1416,6 +1430,7 @@
+         return rc;
+     } else {
+         ftp_set_server_socket_options(&session->control_sock);
++        session->peer_sockaddr = sa;
+         session->control_sockaddr = sa;
+         addr_len = sizeof(session->control_sockaddr);
+ 
+@@ -1507,6 +1522,10 @@
+                     ftp_client_msg(session, 501, "Syntax error in parameters or arguments, missing required args.");
+                 } else if (cmd->auth_required && session->auth_mode != FTP_AUTH_MODE_VALID) {
+                     ftp_client_msg(session, 530, "Not logged in.");
++                } else if ((g_ftp.cfg.read_only || (g_ftp.cfg.write_account_required && session->anonymous)) &&
++                           (!strcmp(cmd->name,"STOR") || !strcmp(cmd->name,"APPE") || !strcmp(cmd->name,"DELE") ||
++                            !strcmp(cmd->name,"RMD") || !strcmp(cmd->name,"MKD") || !strcmp(cmd->name,"RNFR") || !strcmp(cmd->name,"RNTO"))) {
++                    ftp_client_msg(session, 550, "Read-only access.");
+                 } else if (cmd->data_connection_required && session->data_connection == FTP_DATA_CONNECTION_NONE) {
+                     ftp_client_msg(session, 501, "Syntax error in parameters or arguments, no data connection.");
+                 } else {
+@@ -1519,7 +1538,7 @@
+ }
+ 
+ static void ftp_session_send(struct FtpSession* session) {
+-    int rc = ftp_socket_send(&session->control_sock, session->send_buf + session->send_buf_offset, session->send_buf_size - session->send_buf_offset, 0);
++    int rc = ftp_socket_send(&session->control_sock, session->send_buf + session->send_buf_offset, session->send_buf_size, 0);
+     if (rc < 0) {
+         if (errno != EWOULDBLOCK && errno != EAGAIN) {
+             ftp_session_close(session);
+@@ -1533,7 +1552,7 @@
+         }
+     }
+ 
+-    ftp_update_session_time(session);
++    if (rc > 0) ftp_update_session_time(session);
+ }
+ 
+ static void ftp_session_poll(struct FtpSession* session) {
+@@ -1567,21 +1586,23 @@
+ 
+             // consume line.
+             ftp_session_progress_line(session, session->cmd_buf, line_len);
+-            memcpy(session->cmd_buf, session->cmd_buf + line_len, session->cmd_buf_size - line_len);
++            if (session->state == FTP_SESSION_STATE_NONE) return;
++            memmove(session->cmd_buf, session->cmd_buf + line_len, session->cmd_buf_size - line_len);
+             session->cmd_buf_size -= line_len;
+         }
+     }
+ 
+-    ftp_update_session_time(session);
++    if (rc > 0) ftp_update_session_time(session);
+ }
+ 
+ int ftpsrv_init(const struct FtpSrvConfig* cfg) {
+     int rc;
+ 
+-    if (g_ftp.initialised || !cfg) {
++    if (ftp_state || !cfg) {
+         rc = -1;
+     } else {
+-        memset(&g_ftp, 0, sizeof(g_ftp));
++        ftp_state = calloc(1, sizeof(*ftp_state));
++        if (!ftp_state) { errno = ENOMEM; return -1; }
+         memcpy(&g_ftp.cfg, cfg, sizeof(*cfg));
+         g_ftp.initialised = 1;
+ 
+@@ -1604,11 +1625,12 @@
+         }
+     }
+ 
++    if (rc < 0) ftpsrv_exit();
+     return rc;
+ }
+ 
+ int ftpsrv_loop(int timeout_ms) {
+-    if (!g_ftp.initialised) {
++    if (!ftp_state || !g_ftp.initialised) {
+         return FTP_API_LOOP_ERROR_INIT;
+     }
+ 
+@@ -1618,15 +1640,16 @@
+         for (size_t i = 0; i < FTP_ARR_SZ(g_ftp.sessions); i++) {
+             struct FtpSession* session = &g_ftp.sessions[i];
+             if (session->state != FTP_SESSION_STATE_NONE) {
+-                if (difftime(cur_time, session->last_update_time) >= g_ftp.cfg.timeout) {
++                if (difftime(cur_time, session->last_update_time) >= g_ftp.cfg.timeout ||
++                    (session->transfer.mode != FTP_TRANSFER_MODE_NONE && difftime(cur_time, session->transfer.started) >= 4*60*60)) {
+                     ftp_session_close(session);
+                 }
+             }
+         }
+     }
+ 
+-    static struct FtpSocketPollEntry fds[1 + FTP_MAX_SESSIONS * 2] = {0};
+-    static struct FtpSocketPollFd poll_fds[1 + FTP_MAX_SESSIONS * 2] = {0};
++    struct FtpSocketPollEntry fds[1 + FTP_MAX_SESSIONS * 2] = {0};
++    struct FtpSocketPollFd poll_fds[1 + FTP_MAX_SESSIONS * 2] = {0};
+     const size_t nfds = FTP_ARR_SZ(fds);
+ 
+     // initialise fds.
+@@ -1705,8 +1728,11 @@
+             }
+ 
+             // don't close data transfer on error as it will confuse the client (ffmpeg)
+-            if (session->state != FTP_SESSION_STATE_NONE && session->transfer.mode != FTP_TRANSFER_MODE_NONE) {
+-                if (fds[sd].revents & (FtpSocketPollType_IN | FtpSocketPollType_OUT)) {
++            if (session->state == FTP_SESSION_STATE_POLLIN && session->transfer.mode != FTP_TRANSFER_MODE_NONE) {
++                if (fds[sd].revents & FtpSocketPollType_ERROR) {
++                    ftp_data_transfer_end(session);
++                    ftp_client_msg(session, 426, "Data connection failed.");
++                } else if (fds[sd].revents & (FtpSocketPollType_IN | FtpSocketPollType_OUT)) {
+                     if (session->transfer.connection_pending) {
+                         ftp_data_poll(session);
+                     } else {
+@@ -1721,7 +1747,7 @@
+ }
+ 
+ void ftpsrv_exit(void) {
+-    if (!g_ftp.initialised) {
++    if (!ftp_state || !g_ftp.initialised) {
+         return;
+     }
+ 
+@@ -1732,5 +1758,9 @@
+     }
+ 
+     ftp_socket_close(&g_ftp.server_sock);
+-    g_ftp.initialised = 0;
+-}
++    /* Clear credentials and release the entire buffer/session arena. */
++    volatile unsigned char *secret = (volatile unsigned char *)ftp_state;
++    for (size_t i = 0; i < sizeof(*ftp_state); ++i) secret[i] = 0;
++    free(ftp_state);
++    ftp_state = NULL;
++}
