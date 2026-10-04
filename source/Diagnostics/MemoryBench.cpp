@@ -28,6 +28,30 @@ static void WriteWords(volatile u32 *p,unsigned words,unsigned loops)
     for(unsigned n=0;n<loops;++n) for(unsigned i=0;i<words;++i) p[i]=i^0x12345678;
 }
 
+static void MemorySync()
+{
+#if defined(GEKKO)
+    __asm__ volatile("sync":::"memory");
+#else
+    __asm__ volatile("":::"memory");
+#endif
+}
+static u8 *MemoryAlias(u8 *cached,bool uncached)
+{
+    if(!cached) return NULL;
+#if defined(GEKKO)
+    return uncached ? (u8*)MEM_K0_TO_K1(cached) : cached;
+#else
+    // Host coverage checks control flow/data verification, not cache behavior.
+    (void)uncached;return cached;
+#endif
+}
+static void CopyWords(volatile u32 *dst,const volatile u32 *src,unsigned words,unsigned loops)
+{
+    // No libc dcbz/prefetch assumptions on cache-inhibited aliases.
+    for(unsigned n=0;n<loops;++n) for(unsigned i=0;i<words;++i) dst[i]=src[i];
+}
+
 static unsigned MemoryQueueLength()
 {
 #if defined(GEKKO)
@@ -47,11 +71,7 @@ static bool MemoryDrain()
             return false;
         }
     }
-#if defined(GEKKO)
-    __asm__ volatile("sync":::"memory");
-#else
-    __asm__ volatile("":::"memory");
-#endif
+    MemorySync();
     return true;
 }
 
@@ -120,6 +140,53 @@ static bool MemoryRow(FILE *out,const char *operation,const char *src,const char
                    MemoryBytes,ticks_to_microsecs(ticks),verified)>0 && MemoryCheckpoint(out) && verified && ticks;
 }
 
+static bool MemoryAliasBench(FILE *out,u8 **buffers,const u32 *single)
+{
+    const char *names[]={"MEM1-K0","MEM1-K1","MEM2-K0","MEM2-K1"};
+    // Source and destination allocations are distinct even within one bank.
+    for(unsigned repeat=0;repeat<3;++repeat) for(unsigned src=0;src<4;++src)
+        for(unsigned dst=0;dst<4;++dst) {
+            u8 *cachedSrc=buffers[(src/2)*2],*cachedDst=buffers[(dst/2)*2+1];
+            DCFlushRange(cachedSrc,MemoryBlock);DCFlushRange(cachedDst,MemoryBlock);
+            u64 start=gettime();
+            CopyWords((volatile u32*)MemoryAlias(cachedDst,dst&1),
+                      (const volatile u32*)MemoryAlias(cachedSrc,src&1),
+                      MemoryBlock/4,MemoryBytes/MemoryBlock);
+            // Cached output publication is timed; uncached stores also drain.
+            if(!(dst&1)) DCFlushRange(cachedDst,MemoryBlock);
+            MemorySync();u64 elapsed=gettime()-start;
+            // Verify through K0 only after K1 writes have completed.
+            DCInvalidateRange(cachedDst,MemoryBlock);
+            if(!MemoryRow(out,"copy32_alias",names[src],names[dst],MemoryBlock,repeat,
+                          elapsed,crc32(0,cachedDst,MemoryBlock)==single[src/2])) return false;
+        }
+    const unsigned blocks[]={HotBlock,MemoryBlock};
+    for(unsigned b=0;b<2;++b) for(unsigned region=0;region<4;++region)
+        for(unsigned repeat=0;repeat<3;++repeat) {
+            unsigned block=blocks[b],words=block/4,loops=MemoryBytes/block;
+            u8 *cached=buffers[(region/2)*2+1],*alias=MemoryAlias(cached,region&1);
+            WriteWords((volatile u32*)cached,words,1);DCFlushRange(cached,block);
+            u32 expected=0;for(unsigned i=0;i<words;++i) expected+=i^0x12345678;
+            // Warm the selected alias, checking visibility of the K0 pattern.
+            if(ReadWords((const volatile u32*)alias,words,1)!=expected) return false;
+            u64 start=gettime();
+            u32 got=ReadWords((const volatile u32*)alias,words,loops);
+            MemorySync();u64 elapsed=gettime()-start;
+            if(!MemoryRow(out,b ? "read32_alias_stream" : "read32_alias_hot",names[region],
+                          "CPU",block,repeat,elapsed,got==expected*loops)) return false;
+            // Start writes from zero so unchanged output cannot pass verification.
+            memset(cached,0,block);DCFlushRange(cached,block);
+            start=gettime();WriteWords((volatile u32*)alias,words,loops);
+            if(!(region&1)) DCFlushRange(cached,block);
+            MemorySync();elapsed=gettime()-start;DCInvalidateRange(cached,block);
+            bool verified=true;
+            for(unsigned i=0;i<words;++i) if(((volatile u32*)cached)[i]!=(i^0x12345678)) verified=false;
+            if(!MemoryRow(out,b ? "write32_alias_stream" : "write32_alias_hot","CPU",names[region],
+                          block,repeat,elapsed,verified)) return false;
+        }
+    return true;
+}
+
 static u32 MemoryInfo(unsigned address)
 {
 #if defined(GEKKO)
@@ -157,14 +224,14 @@ void RunMemoryBenchmark(const char *directory)
     snprintf(report,sizeof(report),"%s/memory-capacity.csv",directory);
     FILE *meta=fopen(report,"wb");
     if(meta) {
-        fprintf(meta,"bank,physical_bytes,ios_simulated_bytes,ios_arena_bytes,unallocated_arena_bytes,allocator_free_before,benchmark_allocated_bytes,source_address,destination_address\n");
+        fprintf(meta,"bank,physical_bytes,ios_simulated_bytes,ios_arena_bytes,unallocated_arena_bytes,allocator_free_before,benchmark_allocated_bytes,source_address,destination_address,uncached_source_address,uncached_destination_address\n");
         u32 lo1=MemoryInfo(0x8000310c),hi1=MemoryInfo(0x80003110);
         u32 lo2=MemoryInfo(0x80003124),hi2=MemoryInfo(0x80003128);
-        fprintf(meta,"MEM1,%u,%u,%u,%u,%u,%u,%08x,%08x\n",MemoryInfo(0x80003100),MemoryInfo(0x80003104),MemoryArenaBytes(lo1,hi1,0x80000000,MemoryInfo(0x80003100)),
-                arena1,mem1Free,2*MemoryBlock,(u32)(size_t)buffers[0],(u32)(size_t)buffers[1]);
-        fprintf(meta,"MEM2,%u,%u,%u,%u,%u,%u,%08x,%08x\n",MemoryInfo(0x80003118),MemoryInfo(0x8000311c),MemoryArenaBytes(lo2,hi2,0x90000000,MemoryInfo(0x80003118)),
-                arena2,mem2Free,2*MemoryBlock,(u32)(size_t)buffers[2],(u32)(size_t)buffers[3]);
-        fprintf(meta,"LC,16384,0,0,0,0,8192,e0000000,00000000\n");
+        fprintf(meta,"MEM1,%u,%u,%u,%u,%u,%u,%08x,%08x,%08x,%08x\n",MemoryInfo(0x80003100),MemoryInfo(0x80003104),MemoryArenaBytes(lo1,hi1,0x80000000,MemoryInfo(0x80003100)),
+                arena1,mem1Free,2*MemoryBlock,(u32)(size_t)buffers[0],(u32)(size_t)buffers[1],(u32)(size_t)MemoryAlias(buffers[0],true),(u32)(size_t)MemoryAlias(buffers[1],true));
+        fprintf(meta,"MEM2,%u,%u,%u,%u,%u,%u,%08x,%08x,%08x,%08x\n",MemoryInfo(0x80003118),MemoryInfo(0x8000311c),MemoryArenaBytes(lo2,hi2,0x90000000,MemoryInfo(0x80003118)),
+                arena2,mem2Free,2*MemoryBlock,(u32)(size_t)buffers[2],(u32)(size_t)buffers[3],(u32)(size_t)MemoryAlias(buffers[2],true),(u32)(size_t)MemoryAlias(buffers[3],true));
+        fprintf(meta,"LC,16384,0,0,0,0,8192,e0000000,00000000,00000000,00000000\n");
         if(fclose(meta)!=0) okay=false;
     } else okay=false;
     snprintf(report,sizeof(report),"%s/memory-benchmark.csv",directory);
@@ -257,6 +324,8 @@ void RunMemoryBenchmark(const char *directory)
         }
         printf("Memory benchmark: restoring LC state\n");fflush(stdout);
         if(enabled) state.disable(); // Also restores BAT/HID2/MSR before normal app work.
+        // Alias comparisons use the normal cache configuration, after LC restoration.
+        if(okay) okay=MemoryAliasBench(out,buffers,single);
         if(fclose(out)!=0) okay=false;
     } else okay=false;
     printf("Memory benchmark: releasing buffers, verified=%u\n",okay);fflush(stdout);

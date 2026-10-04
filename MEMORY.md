@@ -1,6 +1,6 @@
 # Native memory measurements
 
-The physical Wii benchmark passed all 48 verified operations on 2026-10-04,
+The original physical Wii benchmark passed all 48 verified operations on 2026-10-04,
 followed by normal UI/file checks, exit to HBC and restoration of original
 settings. Every hardware operation used the shared Wii queue-server lease,
 and the exact DOL first passed the same checks in Dolphin. See the measured
@@ -37,7 +37,8 @@ It allocates 512 KiB in each RAM bank, verifies alignment and bank addresses,
 uses different deterministic source patterns to detect address aliasing, and
 releases its buffers before writing the completion marker.
 
-Each operation processes 8 MiB, repeated three times, for 48 CSV rows:
+Each operation processes 8 MiB, repeated three times. The original 48 rows
+remain, and v0.1.5 adds 96 alias rows for 144 total:
 
 - `memcpy`: all four MEM1/MEM2 directions, repeated 256 KiB blocks. Destination
   cache flush is timed; final CRC verification is outside the timer.
@@ -59,7 +60,7 @@ address bits and shift the queue field by four. Compare the official
 [queue implementation](https://github.com/devkitPro/libogc/blob/master/libogc/cache.c)
 and [libogc2 assembly](https://github.com/extremscorner/libogc2/blob/master/libogc/cache_asm.S).
 This workaround is confined to the benchmark; the shared SDK is unchanged.
-Its native behavior still requires validation. Host sanitizer checks exercise
+The original LC workaround passed native validation as recorded below. Host sanitizer checks exercise
 report verification, allocation failure, corrupted DMA, queue timeout and cleanup.
 
 Dolphin is useful for functional checks but cannot establish physical LC DMA
@@ -184,3 +185,88 @@ Allocator free space before the benchmark was 672,904 bytes in MEM1 and
 bytes respectively; these are separate pools, not additive available-memory
 promises. The unset MEM1 IOS arena reports zero (unknown); MEM2's IOS arena was
 56,489,984 bytes. Each RAM bank contributed 512 KiB to the benchmark.
+
+## Cached and uncached address comparisons, 0.1.5
+
+libogc's [alias macros](https://github.com/devkitPro/libogc/blob/master/gc/ogc/system.h)
+map the same physical allocations through K0 (cached) and K1 (uncached):
+
+| Bank | Cached effective range | Uncached effective range | Physical range |
+| --- | --- | --- | --- |
+| MEM1 | `80000000–817fffff` | `c0000000–c17fffff` | `00000000–017fffff` |
+| MEM2 | `90000000–93ffffff` | `d0000000–d3ffffff` | `10000000–13ffffff` |
+
+The benchmark uses `MEM_K0_TO_K1` on its existing aligned allocations; it does
+not allocate/free the aliases or dereference arbitrary addresses. Capacity CSV
+adds uncached source/destination address columns. LC has no K1 comparison.
+
+The new tests run after restoring LC state, with normal CPU cache configuration:
+
+- `copy32_alias`: all 16 source/destination combinations across MEM1-K0,
+  MEM1-K1, MEM2-K0 and MEM2-K1; distinct 256 KiB allocations for source and
+  destination, repeated for 8 MiB per row.
+- `read32_alias_hot` / `write32_alias_hot`: repeated 8 KiB word loops.
+- `read32_alias_stream` / `write32_alias_stream`: repeated 256 KiB word loops.
+  “Stream” denotes sequential access over that footprint; it is not a cold-cache
+  or whole-bank DRAM measurement. Reads have an untimed warm-up pass.
+
+Every combination runs three times. Copy uses the same volatile scalar 32-bit
+loop for all aliases, avoiding libc cache-specific `dcbz`/prefetch assumptions.
+It is intentionally distinct from the existing optimized `memcpy` test. Before
+alias access, cached allocations are flushed. Write timing includes cached
+output publication where needed and a final `sync` for every access mode.
+After uncached writes complete, cached output is invalidated before CRC/word
+verification. No cache operation targets a K1 address. Write tests start from
+zero and verify the final pattern; copy verifies the source bank's independent
+CRC. No allocation is accessed simultaneously through both aliases.
+
+The footprint remains 512 KiB per RAM bank. The controller allows up to 300
+seconds for memory startup/completion because uncached scalar accesses can be
+slow, and requires all 144 exact operation/alias/block/repetition combinations.
+Use a shared-server queue timeout of 600 seconds for native memory runs. Host
+ASan/UBSan tests cover report rows, failed sync/CRC, allocations and LC cleanup;
+host aliases are ordinary pointers and cannot validate physical cache behavior.
+Release builds contain none of these kernels and perform no idle benchmark work.
+
+Validation: `make check` and default debug/release builds passed. The final
+v0.1.5 DOL under `build/dolphin.bL3zzf` passed all 144 operations, exact matrix
+coverage, UI/file/exit, frozen hashes and guest exception/teardown checks.
+Native shared-server job `20261004-135402-86246e` passed all 144 operations
+with that identical DOL, plus UI/file/exit, return to HBC 1.9.6 and restoration
+of original settings/probes. It finished in 65 seconds. Artifacts are
+`build/wii.hmk9lcnb`; physical timings below come from that report, not Dolphin.
+
+Native scalar CPU results, MiB/s; each entry is the median of three verified
+8 MiB logical-access runs. K0 is cached and K1 is uncached:
+
+| Bank / alias | Read, 8 KiB | Write, 8 KiB | Read, 256 KiB | Write, 256 KiB |
+| --- | ---: | ---: | ---: | ---: |
+| MEM1 K0 | 2217.910 | 923.148 | 1210.837 | 818.331 |
+| MEM1 K1 | 71.115 | 231.502 | 71.097 | 231.461 |
+| MEM2 K0 | 2217.910 | 919.963 | 1193.495 | 727.802 |
+| MEM2 K1 | 19.805 | 231.441 | 19.805 | 231.394 |
+
+Native scalar copy matrix, MiB/s; rows are sources and columns destinations.
+Each copy repeatedly visits separate 256 KiB allocations:
+
+| Source → destination | MEM1 K0 | MEM1 K1 | MEM2 K0 | MEM2 K1 |
+| --- | ---: | ---: | ---: | ---: |
+| MEM1 K0 | 207.243 | 225.810 | 102.586 | 225.989 |
+| MEM1 K1 | 67.852 | 48.683 | 66.899 | 48.680 |
+| MEM2 K0 | 111.297 | 217.551 | 66.794 | 212.970 |
+| MEM2 K1 | 19.536 | 17.550 | 19.416 | 17.528 |
+
+Recorded address pairs were `80a7b880 → c0a7b880` and
+`80abb8a0 → c0abb8a0` in MEM1; `90200020 → d0200020` and
+`90240040 → d0240040` in MEM2. Every uncached alias is the corresponding
+cached pointer plus `40000000`; native verification also checked data visibility.
+
+The measured cache-inhibited scalar reads are much slower, particularly in
+MEM2. Cached-source writes to uncached destinations performed well in this
+copy kernel, making write-only output a candidate for further profiling.
+These results do not justify changing application buffers to K1 generally:
+subsequent CPU reads, cache ownership transitions and end-to-end device
+throughput must be included in a real pipeline comparison. Cached runs revisit
+the same allocation and publish final output; they do not write 8 MiB of distinct
+physical storage. The 256 KiB footprint can benefit from cache reuse and is
+not a cold-cache DRAM ceiling. No production allocation/cache policy changed.

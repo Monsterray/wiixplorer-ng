@@ -57,8 +57,14 @@ def send(address,path,args):
   groups += [('write32_hot','CPU',dst,8192) for dst in ('MEM1','MEM2','LC')]
   groups += [('dma_load',src,'LC',8192) for src in ('MEM1','MEM2')]
   groups += [('dma_store','LC',dst,8192) for dst in ('MEM1','MEM2')]
+  aliases=('MEM1-K0','MEM1-K1','MEM2-K0','MEM2-K1')
+  groups += [('copy32_alias',src,dst,262144) for src in aliases for dst in aliases]
+  for suffix,block in (('hot',8192),('stream',262144)):
+   groups += [('read32_alias_'+suffix,src,'CPU',block) for src in aliases]
+   groups += [('write32_alias_'+suffix,'CPU',dst,block) for dst in aliases]
   for op,src,dst,block in groups:
    for repeat in range(3):rows.append(f'{op},{src},{dst},{block},{repeat},8388608,100000,1')
+  if os.environ.get('MEMORY_DUPLICATE'):rows[-1]=rows[-2]
   files[directory+'/memory-benchmark.csv']=('\n'.join(rows)+'\n').encode()
   files[directory+'/memory-complete']=b'1'
   files[directory+'/memory-capacity.csv']=b'bank,physical_bytes\nMEM1,25165824\nMEM2,67108864\nLC,16384\n'
@@ -145,6 +151,10 @@ def generate(root):
         result=subprocess.run(args,env=env,capture_output=True,text=True)
         assert result.returncode==int(failure),result.stdout+result.stderr
         assert 'SD originals restored' in result.stdout,result.stdout+result.stderr
+    env=dict(os.environ,WII_BENCH_JOB_START='1',WII_BENCH_IP='lease-only-test',MEMORY_TEST='1',MEMORY_DUPLICATE='1')
+    result=subprocess.run(['python3',str(root/'scripts/hbc-smoke.py'),'--hardware','--memory-bench'],env=env,capture_output=True,text=True)
+    assert result.returncode==1 and 'missing/duplicate alias' in result.stderr,result.stdout+result.stderr
+    assert 'SD originals restored' in result.stdout,result.stdout+result.stderr
     for device,failure,leftover in (('sd',False,False),('sd',True,False),('sd',False,True),('usb1',False,False),('usb1',True,False)):
         env=dict(os.environ,WII_BENCH_JOB_START='1',WII_BENCH_IP='lease-only-test',ARCHIVE_TEST='1')
         if failure:env['FAIL_ARCHIVE']='1'

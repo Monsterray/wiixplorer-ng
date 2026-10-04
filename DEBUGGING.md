@@ -556,3 +556,26 @@ temporary FTP trace symbols. The bounded release boot (`build/dolphin.Y54STO`)
 recorded no guest fault markers and shut down the core after a host stop; this
 is not interactive release exit acceptance. Temporary probes were removed;
 production archive/backend/buffer defaults and idle release work are unchanged.
+
+## Cached/uncached memory validation, 0.1.5
+
+The explicit debug memory runner now includes 96 additional alias tests using
+libogc K0→K1 conversion on owned, aligned allocations. It covers all 16 bank/
+cache-mode copy combinations and sequential read/write loops over 8 KiB and
+256 KiB footprints, repeated three times. Cache publication, ordering and
+post-write invalidation precede verification; no uncached libc-copy assumption
+is made. The memory allocation footprint and idle/release behavior are unchanged.
+
+Host sanitizer checks, exact 144-row controller coverage, default debug/release
+builds and `make check` passed. Dolphin `build/dolphin.bL3zzf` passed all 144
+operations plus UI/file/exit and fault-aware teardown checks. Native testing
+uses the shared queue server as job `20261004-135402-86246e`; no direct dev-Wii
+access or interruption of another project's lease is permitted. MEMORY.md
+records the alias ranges, methodology and physical results when available.
+
+The native alias job passed all 144 verified rows, exact group coverage and
+UI/file/exit in 65 seconds, returning to HBC 1.9.6 and restoring settings/probes.
+Artifacts are `build/wii.hmk9lcnb`, with the same frozen DOL as the accepted
+Dolphin run. Actual K0/K1 pointers and three-run medians are in MEMORY.md.
+A host negative test also rejects a duplicate row hiding a missing alias/repeat
+while restoring SD originals. Release ELF excludes the alias/memory kernels.

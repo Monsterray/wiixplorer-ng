@@ -43,6 +43,7 @@ harness+=source+r'''
 bool exists(const char *p){struct stat s;return stat(p,&s)==0;}
 void complete(const char *p,int value){FILE *f=fopen(p,"rb");assert(f && fgetc(f)==value);fclose(f);assert(!lcEnabled && allocations==0);}
 int main(){
+ assert(MemoryAlias(nullptr,true)==nullptr);
  assert(MemoryDmaLower(0xe0000000,true)==0xe0000012);
  assert(MemoryDmaLower(0xe0001000,true)==0xe0001012);
  assert(MemoryDmaLower(0xe0000000,false)==0xe0000002);
@@ -59,10 +60,15 @@ int main(){
  while(fgets(line,sizeof(line),f)){char op[32],src[16],dst[16];unsigned block,repeat,bytes,verified;u64 us;
   assert(sscanf(line,"%31[^,],%15[^,],%15[^,],%u,%u,%u,%llu,%u",op,src,dst,&block,&repeat,&bytes,&us,&verified)==8);
   assert(verified && bytes==8388608 && us>0 && repeat<3);++rows;
- }fclose(f);assert(rows==48 && syncCalls==49);
+ }fclose(f);assert(rows==144 && syncCalls==145);
  unsigned beforeSyncFailure=lcActivations;
  failSync=true;RunMemoryBenchmark("sd:/sync-fail");complete("sd:/sync-fail/memory-complete",'0');failSync=false;
  assert(lcActivations==beforeSyncFailure);
+ // Real alias copy verification must reject an incorrect expected source CRC.
+ u8 *testBuffers[]={ (u8*)alloc(MemoryBlock),(u8*)alloc(MemoryBlock),(u8*)alloc(MemoryBlock),(u8*)alloc(MemoryBlock) };
+ for(auto p:testBuffers)memset(p,0,MemoryBlock);
+ u32 wrong[]={0,0};f=tmpfile();assert(f && !MemoryAliasBench(f,testBuffers,wrong));fclose(f);
+ for(auto p:testBuffers)release(p);assert(allocations==0);
  failAlloc=true;RunMemoryBenchmark("sd:/oom");complete("sd:/oom/memory-complete",'0');failAlloc=false;
  corrupt=true;RunMemoryBenchmark("sd:/corrupt");complete("sd:/corrupt/memory-complete",'0');corrupt=false;
  stall=true;RunMemoryBenchmark("sd:/timeout");complete("sd:/timeout/memory-complete",'0');assert(!queued);
@@ -72,4 +78,4 @@ with tempfile.TemporaryDirectory(prefix='wx-memory-check-') as tmp:
     p=Path(tmp);(p/'test.cpp').write_text(harness)
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++11','-O2','-fsanitize=address,undefined',str(p/'test.cpp'),'-lz','-o',str(p/'test')],check=True)
     subprocess.run([str(p/'test')],cwd=p,check=True,timeout=30)
-print('Memory benchmark: 48 verified rows, allocation cleanup, private directory, DMA corruption rejection and LC teardown passed')
+print('Memory benchmark: 144 verified rows (cached/uncached alias matrix), allocation cleanup, private directory, DMA corruption rejection and LC teardown passed')

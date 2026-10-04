@@ -166,7 +166,7 @@ try:
             threading.Thread(target=log_server.serve,args=(True,),daemon=True).start()
         hbc.send(address,str(artifacts/'boot.dol'),arguments)
     print('HBC smoke artifacts:', profile, flush=True)
-    deadline = time.monotonic()+30
+    deadline = time.monotonic()+(300 if a.memory_bench else 30)
     while True:
         try:
             status = hbc.status(address)
@@ -214,7 +214,7 @@ try:
             if hbc.get_file(address,archive_directory+'/'+filename)!=b'': raise RuntimeError('Empty file differs')
         print(f'Native {a.archive_device} archives: {len(rows)} real codec/parser, CRC, traversal and preservation cases passed',flush=True)
     if a.memory_bench:
-        deadline=time.monotonic()+120
+        deadline=time.monotonic()+300
         while True:
             try:
                 complete=hbc.get_file(address,copy_directory+'/memory-complete')
@@ -225,8 +225,22 @@ try:
             if time.monotonic()>deadline: raise RuntimeError('Memory benchmark incomplete')
             time.sleep(1)
         rows=list(csv.DictReader(report.decode().splitlines()))
-        if len(rows)!=48 or any(r['verified']!='1' or int(r['ticks_us'])<=0 or int(r['bytes'])!=8388608 for r in rows):
+        if len(rows)!=144 or any(r['verified']!='1' or int(r['ticks_us'])<=0 or int(r['bytes'])!=8388608 for r in rows):
             raise RuntimeError('Memory benchmark report failed verification')
+        aliases=('MEM1-K0','MEM1-K1','MEM2-K0','MEM2-K1')
+        expected_groups=[('memcpy',src,dst,262144) for src in ('MEM1','MEM2') for dst in ('MEM1','MEM2')]
+        expected_groups += [('crc32_cached',src,'CPU',262144) for src in ('MEM1','MEM2')]
+        expected_groups += [('read32_hot',src,'CPU',8192) for src in ('MEM1','MEM2','LC')]
+        expected_groups += [('write32_hot','CPU',dst,8192) for dst in ('MEM1','MEM2','LC')]
+        expected_groups += [('dma_load',src,'LC',8192) for src in ('MEM1','MEM2')]
+        expected_groups += [('dma_store','LC',dst,8192) for dst in ('MEM1','MEM2')]
+        expected_groups += [('copy32_alias',src,dst,262144) for src in aliases for dst in aliases]
+        for suffix,block in (('hot',8192),('stream',262144)):
+            expected_groups += [('read32_alias_'+suffix,src,'CPU',block) for src in aliases]
+            expected_groups += [('write32_alias_'+suffix,'CPU',dst,block) for dst in aliases]
+        expected={(op,src,dst,block,repeat) for op,src,dst,block in expected_groups for repeat in range(3)}
+        actual={(r['operation'],r['source'],r['destination'],int(r['block_bytes']),int(r['repeat'])) for r in rows}
+        if actual!=expected: raise RuntimeError('Memory benchmark missing/duplicate alias or operation groups')
         (profile/'memory-benchmark.csv').write_bytes(report)
         capacity=hbc.get_file(address,copy_directory+'/memory-capacity.csv')
         (profile/'memory-capacity.csv').write_bytes(capacity)
@@ -238,7 +252,7 @@ try:
             groups.setdefault(group_key,[]).append(int(row['bytes'])/1048576/(int(row['ticks_us'])/1000000))
         for (operation,src,dst),speeds in (groups.items() if a.hardware else ()):
             print(f'{operation} {src}->{dst}: median {statistics.median(speeds):.3f} MiB/s ({len(speeds)} verified runs)',flush=True)
-        if not a.hardware: print('Dolphin memory correctness: 48 verified operations; emulator timings are not Wii bandwidth',flush=True)
+        if not a.hardware: print('Dolphin memory correctness: 144 verified operations; emulator timings are not Wii bandwidth',flush=True)
         hbc.file_request(address,'D',copy_directory+'/memory-complete')
         hbc.file_request(address,'D',copy_directory+'/memory-benchmark.csv')
         hbc.file_request(address,'D',copy_directory)
