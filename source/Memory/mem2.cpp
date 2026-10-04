@@ -7,12 +7,13 @@
 #include <ogc/system.h>
 #include <algorithm>
 #include <stdint.h>
+#include <limits.h>
+#include <errno.h>
 #define HBC_NETLOG_LAYOUT_ONLY
 #define HBC_AGENT_LAYOUT_ONLY
 #include <hbc_netlog.h>
 #include <hbc_agent.h>
 
-#define MAX_MEM1_ARENA_LO	((void *) (0x81700000-size))
 #define MEM2_PRIORITY_SIZE	30720	// 30KB
 
 // Forbid the use of MEM2 through malloc
@@ -29,6 +30,19 @@ static CMEM2Alloc &HeapFor(const void *p)
 }
 
 static bool g_bigGoesToMem2 = false;
+static bool HeapSizeValid(size_t size)
+{
+    // Newlib uses signed chunk sizes. Its current realloc overflow return
+    // leaks the malloc lock; reject before entry, including alignment overhead.
+    if (size > (size_t)INT_MAX-32) { errno = ENOMEM; return false; }
+    return true;
+}
+static bool PreferMem2(size_t size)
+{
+    const uintptr_t limit = 0x81700000u;
+    return size > limit || (uintptr_t)SYS_GetArena1Lo() > limit-size ||
+           (g_bigGoesToMem2 && size > MEM2_PRIORITY_SIZE);
+}
 
 extern "C"
 {
@@ -48,25 +62,32 @@ void MEM2_takeBigOnes(bool b)
 
 void MEM2_init(unsigned int mem2Size)
 {
+    if (heapEnd) return; // Do not replace a live pool or lose its arena owner.
 	originalArena2Lo = SYS_GetArena2Lo();
-    u32 begin = std::max(((u32)originalArena2Lo + 31) & ~31u, 0x90200000u);
-    u32 end = std::min(begin + std::min(mem2Size * 0x100000u, SYS_GetArena2Size() & ~31u), 0x93300000u);
-    if (begin < HbcKeepStart) g_mem2gp.init((void *)begin, (void *)std::min(end, HbcKeepStart));
-    if (end > HbcKeepEnd) g_mem2upper.init((void *)std::max(begin, HbcKeepEnd), (void *)end);
+    uintptr_t low = (uintptr_t)originalArena2Lo;
+    uintptr_t high = std::min<uintptr_t>((uintptr_t)SYS_GetArena2Hi(), 0x93300000u) & ~uintptr_t(31);
+    if (low > high || high-low < 32) { heapEnd = NULL; return; }
+    uintptr_t begin = std::max<uintptr_t>((low+31) & ~uintptr_t(31), 0x90200000u);
+    if (begin >= high || !mem2Size) { heapEnd = NULL; return; }
+    uintptr_t end = begin + std::min<uint64_t>(uint64_t(mem2Size)*0x100000u, high-begin);
+    if (begin < HbcKeepStart) g_mem2gp.init((void *)begin, (void *)std::min<uintptr_t>(end, HbcKeepStart));
+    if (end > HbcKeepEnd) g_mem2upper.init((void *)std::max<uintptr_t>(begin, HbcKeepEnd), (void *)end);
     heapEnd = (void *)end;
     SYS_SetArena2Lo(heapEnd);
 }
 
 void MEM2_cleanup(void)
 {
-	bool ownsArena = SYS_GetArena2Lo() == heapEnd;
+	bool ownsArena = heapEnd && SYS_GetArena2Lo() == heapEnd;
 	if (g_mem2upper.getEndAddress()) g_mem2upper.cleanup();
     if (g_mem2gp.getEndAddress()) g_mem2gp.cleanup();
     if (ownsArena) SYS_SetArena2Lo(originalArena2Lo);
+    heapEnd = NULL;
 }
 
 void *MEM2_alloc(unsigned int s)
 {
+	if (!HeapSizeValid(s)) return NULL;
 	void *p = g_mem2gp.getEndAddress() ? g_mem2gp.allocate(s) : NULL;
     return p ? p : (g_mem2upper.getEndAddress() ? g_mem2upper.allocate(s) : NULL);
 }
@@ -78,6 +99,8 @@ void MEM2_free(void *p)
 
 void *MEM2_realloc(void *p, unsigned int s)
 {
+	if (!HeapSizeValid(s)) return NULL;
+	if (!s) { MEM2_free(p); return NULL; }
 	if (!p) return MEM2_alloc(s);
     void *result = HeapFor(p).reallocate(p, s);
     if (result || !s) return result;
@@ -100,13 +123,20 @@ unsigned int MEM2_freesize()
            (g_mem2upper.getEndAddress() ? g_mem2upper.FreeSize() : 0);
 }
 
+unsigned int MEM2_largestblock()
+{
+    return std::max(g_mem2gp.LargestFreeSize(), g_mem2upper.LargestFreeSize());
+}
+
 void *MEM1_alloc(unsigned int s)
 {
+	if (!HeapSizeValid(s)) return NULL;
 	return __real_malloc(s);
 }
 
 void *MEM1_memalign(unsigned int a, unsigned int s)
 {
+	if (!HeapSizeValid(s)) return NULL;
 	return __real_memalign(a, s);
 }
 
@@ -117,13 +147,16 @@ void MEM1_free(void *p)
 
 void *MEM1_realloc(void *p, unsigned int s)
 {
+	if (!HeapSizeValid(s)) return NULL;
+	if (!s) { __real_free(p); return NULL; }
 	return __real_realloc(p, s);
 }
 
 void *__wrap_malloc(size_t size)
 {
+	if (!HeapSizeValid(size)) return NULL;
 	void *p;
-	if ((SYS_GetArena1Lo() > MAX_MEM1_ARENA_LO) || (g_bigGoesToMem2 && size > MEM2_PRIORITY_SIZE))
+	if (PreferMem2(size))
 	{
 		p = MEM2_alloc(size);
 		if (p != 0) {
@@ -140,13 +173,16 @@ void *__wrap_malloc(size_t size)
 
 void *__wrap_calloc(size_t n, size_t size)
 {
+	if (size && n > SIZE_MAX/size) { errno = ENOMEM; return NULL; }
+	const size_t total = n*size;
+	if (!HeapSizeValid(total)) return NULL;
 	void *p;
-	if ((SYS_GetArena1Lo() > MAX_MEM1_ARENA_LO) || (g_bigGoesToMem2 && size > MEM2_PRIORITY_SIZE))
+	if (PreferMem2(total))
 	{
-		p = MEM2_alloc(n * size);
+		p = total <= UINT_MAX ? MEM2_alloc(total) : NULL;
 		if (p != 0)
 		{
-			memset(p, 0, n * size);
+			memset(p, 0, total);
 			return p;
 		}
 		return __real_calloc(n, size);
@@ -155,17 +191,18 @@ void *__wrap_calloc(size_t n, size_t size)
 	if (p != 0) {
 		return p;
 	}
-	p = MEM2_alloc(n * size);
+	p = total <= UINT_MAX ? MEM2_alloc(total) : NULL;
 	if (p != 0) {
-		memset(p, 0, n * size);
+		memset(p, 0, total);
 	}
 	return p;
 }
 
 void *__wrap_memalign(size_t a, size_t size)
 {
+	if (!HeapSizeValid(size)) return NULL;
 	void *p;
-	if ((SYS_GetArena1Lo() > MAX_MEM1_ARENA_LO) || (g_bigGoesToMem2 && size > MEM2_PRIORITY_SIZE))
+	if (PreferMem2(size))
 	{
 		if (a == 32)
 		{
@@ -201,6 +238,8 @@ void __wrap_free(void *p)
 
 void *__wrap_realloc(void *p, size_t size)
 {
+	if (!HeapSizeValid(size)) return NULL;
+	if (!size) { __wrap_free(p); return NULL; }
 	void *n;
 	// ptr from mem2
 	if (((u32)p & 0x10000000) != 0 || (p == 0 && g_bigGoesToMem2 && size > MEM2_PRIORITY_SIZE))

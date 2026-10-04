@@ -3,6 +3,7 @@
 #include <ogc/system.h>
 #include <algorithm>
 #include <string.h>
+#include <stdint.h>
 
 #define IOS_RELOAD_AREA		0x90200000
 
@@ -16,23 +17,29 @@ public:
 
 void CMEM2Alloc::init(unsigned int size)
 {
-	m_baseAddress = (SBlock *) std::max(((u32)SYS_GetArena2Lo() + 31) & ~31, IOS_RELOAD_AREA);
-	m_endAddress = (SBlock *) ((char *)m_baseAddress + std::min(size * 0x100000, SYS_GetArena2Size() & ~31));
-	if (m_endAddress > (SBlock *) 0x93300000) //rest is reserved for usb/usb2/network and other stuff... (0xE0000 bytes)
-		m_endAddress = (SBlock *) 0x93300000;
+	uintptr_t low = (uintptr_t)SYS_GetArena2Lo();
+	uintptr_t high = std::min<uintptr_t>((uintptr_t)SYS_GetArena2Hi(), 0x93300000u) & ~uintptr_t(31);
+	if (low > high || high-low < 32) return;
+	uintptr_t begin = std::max<uintptr_t>((low+31) & ~uintptr_t(31), IOS_RELOAD_AREA);
+	if (begin >= high || !size) return;
+	uintptr_t end = begin + std::min<uint64_t>(uint64_t(size)*0x100000u, high-begin);
+	init((void *)begin, (void *)end);
 	SYS_SetArena2Lo(m_endAddress);
-	LWP_MutexInit(&m_mutex, 0);
 }
 
 void CMEM2Alloc::init(void *addr, void *end)
 {
-	m_baseAddress = (SBlock *)(((u32)addr + 31) & ~31);
-	m_endAddress = (SBlock *)((u32)end & ~31);
+	uintptr_t low = (uintptr_t)addr, high = (uintptr_t)end & ~uintptr_t(31);
+	if (!low || low > high || high-low < 32) return;
+	m_baseAddress = (SBlock *)((low + 31) & ~uintptr_t(31));
+	m_endAddress = (SBlock *)high;
+	m_first = 0;
 	LWP_MutexInit(&m_mutex, 0);
 }
 
 void CMEM2Alloc::cleanup(void)
 {
+	if (!m_baseAddress) return;
 	LWP_MutexDestroy(m_mutex);
 	m_mutex = 0;
 	m_first = 0;
@@ -45,8 +52,10 @@ void CMEM2Alloc::cleanup(void)
 
 void CMEM2Alloc::clear(void)
 {
+	if (!m_baseAddress) return;
+	LockMutex lock(m_mutex);
 	m_first = 0;
-	memset(m_baseAddress, 0, (u8 *)m_endAddress - (u8 *)m_endAddress);
+	memset(m_baseAddress, 0, (uintptr_t)m_endAddress - (uintptr_t)m_baseAddress);
 }
 
 unsigned int CMEM2Alloc::usableSize(void *p)
@@ -58,6 +67,7 @@ void *CMEM2Alloc::allocate(unsigned int s)
 {
 	if (s == 0)
 		s = 1;
+	if (!m_baseAddress) return 0;
 	//
 	LockMutex lock(m_mutex);
 	//
@@ -65,7 +75,7 @@ void *CMEM2Alloc::allocate(unsigned int s)
 	// First block
 	if (m_first == 0)
 	{
-		if (m_baseAddress + s + 1 >= m_endAddress)
+		if (s >= ((uintptr_t)m_endAddress-(uintptr_t)m_baseAddress)/sizeof(SBlock))
 			return 0;
 		m_first = m_baseAddress;
 		m_first->next = 0;
@@ -86,9 +96,10 @@ void *CMEM2Alloc::allocate(unsigned int s)
 	// Create a new block
 	if (i == 0)
 	{
-		i = j + j->s + 1;
-		if (i + s + 1 >= m_endAddress)
+		uintptr_t next = (uintptr_t)j + (uintptr_t(j->s)+1)*sizeof(SBlock);
+		if (next >= (uintptr_t)m_endAddress || s >= ((uintptr_t)m_endAddress-next)/sizeof(SBlock))
 			return 0;
+		i = (SBlock *)next;
 		j->next = i;
 		i->prev = j;
 		i->next = 0;
@@ -153,24 +164,18 @@ void *CMEM2Alloc::reallocate(void *p, unsigned int s)
 	SBlock *j;
 	void *n;
 
-	if (s == 0)
-		s = 1;
+	if (s == 0) { release(p); return 0; }
 	if (p == 0)
 		return allocate(s);
+	if (s > (uintptr_t)m_endAddress-(uintptr_t)m_baseAddress-sizeof(SBlock)) return 0;
 
 	i = (SBlock *)p - 1;
 	s = (s - 1) / sizeof (SBlock) + 1;
 	{
 		LockMutex lock(m_mutex);
 
-		//out of memory /* Dimok */
-		if (i + s + 1 >= m_endAddress)
-		{
-			return 0;
-		}
-
 		// Last block
-		if (i->next == 0 && i + s + 1 < m_endAddress)
+		if (i->next == 0 && s < ((uintptr_t)m_endAddress-(uintptr_t)i)/sizeof(SBlock))
 		{
 			i->s = s;
 			return p;
@@ -199,6 +204,11 @@ void *CMEM2Alloc::reallocate(void *p, unsigned int s)
 				i->next = j;
 				if (j->next != 0)
 					j->next->prev = j;
+				if (j->next && j->next->f) {
+					j->s += j->next->s + 1;
+					j->next = j->next->next;
+					if (j->next) j->next->prev = j;
+				}
 			}
 			return p;
 		}
@@ -214,10 +224,11 @@ void *CMEM2Alloc::reallocate(void *p, unsigned int s)
 
 unsigned int CMEM2Alloc::FreeSize()
 {
+	if (!m_baseAddress) return 0;
 	LockMutex lock(m_mutex);
 
 	if (m_first == 0)
-		return (const char *) m_endAddress - (const char *) m_baseAddress;
+		return (uintptr_t)m_endAddress-(uintptr_t)m_baseAddress-sizeof(SBlock);
 
 	SBlock *i;
 	unsigned int size = 0;
@@ -231,10 +242,29 @@ unsigned int CMEM2Alloc::FreeSize()
 			size += m_endAddress - i - 1;
 
 		else if(!i->f && i->next == 0)
-			size += m_endAddress - i - i->s - 1;
+		{
+			unsigned int tail = m_endAddress - i - i->s - 1;
+			if (tail) size += tail-1; // A new tail allocation needs its own header.
+		}
 	}
 
 	return size*sizeof(SBlock);
+}
+
+unsigned int CMEM2Alloc::LargestFreeSize()
+{
+	if (!m_baseAddress) return 0;
+	LockMutex lock(m_mutex);
+	if (!m_first) return (uintptr_t)m_endAddress-(uintptr_t)m_baseAddress-sizeof(SBlock);
+	unsigned int largest = 0;
+	for (SBlock *b = m_first; b; b = b->next) {
+		if (b->f) largest = std::max(largest, b->s*(unsigned int)sizeof(SBlock));
+		if (!b->next && !b->f) {
+			uintptr_t remaining = (uintptr_t)m_endAddress-(uintptr_t)b-(uintptr_t(b->s)+1)*sizeof(SBlock);
+			if (remaining > sizeof(SBlock)) largest = std::max(largest, (unsigned int)(remaining-sizeof(SBlock)));
+		}
+	}
+	return largest;
 }
 
 #if WX_PROBE_CPU && WX_PROBE_LEVEL >= 3

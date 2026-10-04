@@ -3,6 +3,11 @@
 For the prioritized project changes, ownership policies and validation gates,
 see [the memory optimization plan](MEMORY-PLAN.md).
 
+The v0.1.8 allocator safety validation also passed all 144 operations in Dolphin
+and on the queued dev Wii. Its new contiguous-capacity snapshot and implemented
+fixes are recorded in the plan; the speed tables below retain the original
+v0.1.5 measurement set for consistent comparison.
+
 The v0.1.5 benchmark passed **144 verified operations** on the physical Wii on
 2026-10-04, after the identical DOL passed Dolphin. UI/file checks, exit to HBC
 1.9.6 and restoration of original settings/probes also passed. All dev-Wii

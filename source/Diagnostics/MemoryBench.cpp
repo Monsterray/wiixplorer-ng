@@ -2,6 +2,7 @@
 #include "TransferBench.h"
 #if WX_DEBUG_BUILD
 #include "Memory/mem2.h"
+#include "Memory/mem2alloc.hpp"
 #include <gccore.h>
 #include <ogc/cache.h>
 #include <ogc/irq.h>
@@ -12,6 +13,51 @@
 #include <sys/stat.h>
 #include <malloc.h>
 #include <zlib.h>
+#include <limits.h>
+
+#if defined(GEKKO)
+extern "C" void *__wrap_calloc(size_t, size_t);
+extern "C" void *__wrap_realloc(void *, size_t);
+static bool MemoryAllocatorChecks()
+{
+    // Outside timed kernels: exercise the real 32-bit pool and wrappers.
+    void *backing = MEM2_alloc(32768);
+    if (!backing) return false;
+    CMEM2Alloc pool;
+    pool.init(backing, (u8*)backing+32768);
+    void *a = pool.allocate(20000), *b = pool.allocate(12000);
+    bool okay = a && b && !pool.allocate(UINT_MAX);
+    if (okay) {
+        memset(b, 0x71, 12000);
+        pool.release(a);
+        void *moved = pool.reallocate(b, 16000);
+        okay = moved == a;
+        if (moved) {
+            for (unsigned i=0;i<12000;++i) if (((u8*)moved)[i]!=0x71) okay=false;
+            pool.release(moved);
+        } else pool.release(b);
+    }
+    pool.clear();
+    a = pool.allocate(32768-32);
+    okay = okay && a && !pool.allocate(1) && !pool.reallocate(a, UINT_MAX);
+    pool.release(a);
+    okay = okay && pool.LargestFreeSize()==32768-32 && !__wrap_calloc(SIZE_MAX, 2);
+    pool.cleanup(); MEM2_free(backing);
+    a = MEM1_alloc(64);
+    if (!a) return false;
+    memset(a, 0x52, 64);
+    void *grown = __wrap_realloc(a, UINT_MAX);
+    if (grown) { free(grown); return false; }
+    for (unsigned i=0;i<64;++i) if (((u8*)a)[i]!=0x52) okay=false;
+    okay = !__wrap_realloc(a, 0) && okay;
+    a = MEM2_alloc(64);
+    if (!a) return false;
+    okay = !__wrap_realloc(a, 0) && okay;
+    printf("Memory allocator checks: %s\n", okay ? "passed" : "FAILED");
+    fflush(stdout);
+    return okay;
+}
+#endif
 
 static const unsigned MemoryBlock=256*1024, HotBlock=8192, MemoryBytes=8*1024*1024;
 
@@ -210,11 +256,14 @@ void RunMemoryBenchmark(const char *directory)
         strstr(directory,"..") || mkdir(directory,0700)!=0) return;
     char report[768];
     snprintf(report,sizeof(report),"%s/memory-benchmark.csv",directory);
-    u32 mem1Free=mallinfo().fordblks,mem2Free=MEM2_freesize();
+    u32 mem1Free=mallinfo().fordblks,mem2Free=MEM2_freesize(),mem2Largest=MEM2_largestblock();
     u32 arena1=SYS_GetArena1Size(),arena2=SYS_GetArena2Size();
     u8 *buffers[]={ (u8*)MEM1_memalign(32,MemoryBlock),(u8*)MEM1_memalign(32,MemoryBlock),
                    (u8*)MEM2_alloc(MemoryBlock),(u8*)MEM2_alloc(MemoryBlock) };
     bool okay=true;
+#if defined(GEKKO)
+    okay=MemoryAllocatorChecks();
+#endif
     for(unsigned i=0;i<4;++i) {
         if (!buffers[i] || ((size_t)buffers[i]&31)) okay=false;
 #if defined(GEKKO)
@@ -224,14 +273,14 @@ void RunMemoryBenchmark(const char *directory)
     snprintf(report,sizeof(report),"%s/memory-capacity.csv",directory);
     FILE *meta=fopen(report,"wb");
     if(meta) {
-        fprintf(meta,"bank,physical_bytes,ios_simulated_bytes,ios_arena_bytes,unallocated_arena_bytes,allocator_free_before,benchmark_allocated_bytes,source_address,destination_address,uncached_source_address,uncached_destination_address\n");
+        fprintf(meta,"bank,physical_bytes,ios_simulated_bytes,ios_arena_bytes,unallocated_arena_bytes,allocator_free_before,benchmark_allocated_bytes,source_address,destination_address,uncached_source_address,uncached_destination_address,allocator_largest_before\n");
         u32 lo1=MemoryInfo(0x8000310c),hi1=MemoryInfo(0x80003110);
         u32 lo2=MemoryInfo(0x80003124),hi2=MemoryInfo(0x80003128);
-        fprintf(meta,"MEM1,%u,%u,%u,%u,%u,%u,%08x,%08x,%08x,%08x\n",MemoryInfo(0x80003100),MemoryInfo(0x80003104),MemoryArenaBytes(lo1,hi1,0x80000000,MemoryInfo(0x80003100)),
+        fprintf(meta,"MEM1,%u,%u,%u,%u,%u,%u,%08x,%08x,%08x,%08x,\n",MemoryInfo(0x80003100),MemoryInfo(0x80003104),MemoryArenaBytes(lo1,hi1,0x80000000,MemoryInfo(0x80003100)),
                 arena1,mem1Free,2*MemoryBlock,(u32)(size_t)buffers[0],(u32)(size_t)buffers[1],(u32)(size_t)MemoryAlias(buffers[0],true),(u32)(size_t)MemoryAlias(buffers[1],true));
-        fprintf(meta,"MEM2,%u,%u,%u,%u,%u,%u,%08x,%08x,%08x,%08x\n",MemoryInfo(0x80003118),MemoryInfo(0x8000311c),MemoryArenaBytes(lo2,hi2,0x90000000,MemoryInfo(0x80003118)),
-                arena2,mem2Free,2*MemoryBlock,(u32)(size_t)buffers[2],(u32)(size_t)buffers[3],(u32)(size_t)MemoryAlias(buffers[2],true),(u32)(size_t)MemoryAlias(buffers[3],true));
-        fprintf(meta,"LC,16384,0,0,0,0,8192,e0000000,00000000,00000000,00000000\n");
+        fprintf(meta,"MEM2,%u,%u,%u,%u,%u,%u,%08x,%08x,%08x,%08x,%u\n",MemoryInfo(0x80003118),MemoryInfo(0x8000311c),MemoryArenaBytes(lo2,hi2,0x90000000,MemoryInfo(0x80003118)),
+                arena2,mem2Free,2*MemoryBlock,(u32)(size_t)buffers[2],(u32)(size_t)buffers[3],(u32)(size_t)MemoryAlias(buffers[2],true),(u32)(size_t)MemoryAlias(buffers[3],true),mem2Largest);
+        fprintf(meta,"LC,16384,0,0,0,0,8192,e0000000,00000000,00000000,00000000,\n");
         if(fclose(meta)!=0) okay=false;
     } else okay=false;
     snprintf(report,sizeof(report),"%s/memory-benchmark.csv",directory);

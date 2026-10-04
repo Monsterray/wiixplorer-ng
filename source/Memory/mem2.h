@@ -19,10 +19,13 @@ void MEM2_init(unsigned int mem2Size);
 void MEM2_cleanup(void);
 void MEM2_takeBigOnes(bool b);
 void *MEM2_alloc(unsigned int s);
+// A zero-size realloc releases p and returns NULL, in either bank.
 void *MEM2_realloc(void *p, unsigned int s);
 void MEM2_free(void *p);
 unsigned int MEM2_usableSize(void *p);
 unsigned int MEM2_freesize();
+// Explicit snapshot: scans the pools; no background accounting or polling.
+unsigned int MEM2_largestblock();
 bool MEM2_check();
 
 #ifdef __cplusplus

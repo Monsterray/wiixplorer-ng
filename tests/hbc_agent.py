@@ -21,9 +21,12 @@ code = r'''
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
+#include <climits>
+#include <cerrno>
 using u32 = uint32_t;
 void *arena = (void *)0x90100000;
 void *SYS_GetArena2Lo() { return arena; }
+void *SYS_GetArena2Hi() { return (void *)0x94000000; }
 unsigned SYS_GetArena2Size() { return 0x03f00000; }
 void SYS_SetArena2Lo(void *p) { arena = p; }
 struct CMEM2Alloc {
@@ -45,7 +48,7 @@ static const u32 HbcKeepStart=0x91800000, HbcKeepEnd=0x918000a0;
 static CMEM2Alloc g_mem2gp, g_mem2upper;
 static void *originalArena2Lo, *heapEnd;
 '''
-for signature in ['static CMEM2Alloc &HeapFor(', 'void MEM2_init(', 'void MEM2_cleanup(',
+for signature in ['static bool HeapSizeValid(', 'static CMEM2Alloc &HeapFor(', 'void MEM2_init(', 'void MEM2_cleanup(',
                   'void *MEM2_alloc(', 'void MEM2_free(', 'unsigned int MEM2_freesize(']:
     code += function(source, signature).replace("(u32)originalArena2Lo", "(u32)(uintptr_t)originalArena2Lo") + '\n'
 code += r'''
@@ -54,6 +57,7 @@ int main() {
  assert(g_mem2gp.lo==0x90200000 && g_mem2gp.hi==HbcKeepStart);
  assert(g_mem2upper.lo==HbcKeepEnd && g_mem2upper.hi==0x93300000);
  assert((uintptr_t)arena==0x93300000);
+ MEM2_init(4);assert((uintptr_t)arena==0x93300000);
  assert(MEM2_freesize()==0x03100000-(HbcKeepEnd-HbcKeepStart));
  void *low=MEM2_alloc(0x01600000); assert(low==(void *)0x90200000);
  void *high=MEM2_alloc(1024); assert(high==(void *)HbcKeepEnd);
@@ -64,6 +68,12 @@ int main() {
  MEM2_init(4); assert(!g_mem2upper.hi); assert(MEM2_alloc(32));
  arena=(void *)0x93800000; // Another owner extended the arena: do not reset it.
  MEM2_cleanup(); assert(arena==(void *)0x93800000);
+ MEM2_cleanup(); assert(arena==(void *)0x93800000);
+ // No wraparound, backwards reservation or persistent-record allocation.
+ MEM2_init(UINT32_MAX); assert(!heapEnd && arena==(void*)0x93800000);
+ arena=(void*)0x932ffff1;MEM2_init(52);assert(!heapEnd && arena==(void*)0x932ffff1);
+ arena=(void*)0x90100000;MEM2_init(UINT32_MAX);assert(heapEnd==(void*)0x93300000);MEM2_cleanup();
+ MEM2_init(0);assert(!heapEnd && arena==(void*)0x90100000);
 }
 '''
 # This routine is an addition in the tracked patch; compile its real body.

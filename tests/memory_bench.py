@@ -28,6 +28,7 @@ u64 gettime(){return std::chrono::duration_cast<std::chrono::nanoseconds>(std::c
 u64 ticks_to_microsecs(u64 t){return t/1000;}
 void *alloc(unsigned n){if(failAlloc)return nullptr;void *p=nullptr;assert(posix_memalign(&p,32,n)==0);++allocations;return p;}
 unsigned MEM2_freesize(){return 1048576;}unsigned SYS_GetArena1Size(){return 0;}unsigned SYS_GetArena2Size(){return 0;}
+unsigned MEM2_largestblock(){return 524288;}
 void *MEM1_memalign(unsigned,unsigned n){return alloc(n);}void *MEM2_alloc(unsigned n){return alloc(n);}
 void release(void *p){if(p){--allocations;free(p);}}
 void MEM1_free(void *p){release(p);}void MEM2_free(void *p){release(p);}

@@ -21,6 +21,7 @@ public:
 	void *getEndAddress(void) const { return m_endAddress; }
 	void info(void *&address, unsigned int &size) const { address = m_baseAddress; size = (const char *)m_endAddress - (const char *)m_baseAddress; }
 	unsigned int FreeSize();
+	unsigned int LargestFreeSize();
 	bool CheckIntegrity();
 	//
 	CMEM2Alloc(void) : m_baseAddress(0), m_endAddress(0), m_first(0), m_mutex(0) { }

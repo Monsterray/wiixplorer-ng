@@ -1,14 +1,47 @@
 # Memory optimization plan
 
-Status: proposed implementation sequence, based on the v0.1.6 source audit
-and the physical-Wii measurements in [MEMORY.md](MEMORY.md). This document
-changes no runtime allocation, buffer size, cache policy or library.
+Status: allocator correctness stage implemented in v0.1.8; subsequent owner
+accounting and placement stages remain planned. The original sequence is based
+on the v0.1.6 source audit and measurements in [MEMORY.md](MEMORY.md).
+
+### Implemented foundation (v0.1.8)
+
+* Checked calloc products and total-byte routing; defined zero-size realloc
+  as free-and-return-NULL in both banks; preserved failed nonzero realloc input.
+* Checked arena arithmetic and pool capacity before forming pointers; recovered
+  exact-fit allocations, earlier-hole realloc fallback and shrink coalescing.
+  Reset now clears the actual pool under its mutex, and free-space counts exclude
+  the header required for a subsequent allocation.
+* Added `MEM2_largestblock()` as an explicit snapshot, not an idle scan. Native
+  capacity reports now include it; blank MEM1/LC fields mean not measured.
+* Dolphin target tests exposed an installed Newlib realloc overflow return
+  that leaves the MEM1 malloc lock held. Shared wrapper/direct-bank guards reject
+  requests above `INT_MAX - 32` before reaching that backend. This is a signed
+  allocator representation limit with alignment/metadata headroom, not a file
+  size limit. No shared SDK modification was required.
+* Added sanitized production-pool tests, cross-pool/failure preservation,
+  boundary routing and 10,000 deterministic mixed allocation lifetimes, plus
+  debug-only target checks integrated into the existing memory benchmark.
+
+Host `make check` and debug/release builds passed. The corrected frozen DOL
+passed Dolphin profile `build/dolphin.Ts7TNY`, then shared queue-server job
+`20261004-162324-dc9036` on the physical Wii (65 seconds, HBC 1.10.0). Native
+artifacts are in ignored `build/wii.xk98z645`. Both runs passed all 144 memory
+operations, agent UI/file checks and exit; the native job restored settings and
+probe files. Earlier diagnostic hangs are not successful validation evidence.
+
+At this native snapshot, MEM2 had 51,380,000 free payload bytes but a largest
+block of 28,311,360 bytes. MEM1 allocator-free was 671,936 bytes. These remain
+single workload snapshots; no owner budget, allocation placement, transfer
+buffer default, production LC use or CPU/device cache policy has changed.
+Release linking removes the unused benchmark and largest-block diagnostic
+functions. Per-owner peaks, concurrency reserves and stack accounting are next.
 
 Correctness and data safety come first, followed by bounded resources,
 compatibility and measured performance. Keep changes confined to individual
 owners and existing helpers; no allocator replacement or broad UI refactor.
 
-## What the project actually does
+## Baseline at the original v0.1.6 audit
 
 * [Application.cpp](source/Controls/Application.cpp) requests a 52 MiB MEM2
   pool. [mem2.cpp](source/Memory/mem2.cpp) clamps its range between the IOS
@@ -45,11 +78,11 @@ Work in [mem2.cpp](source/Memory/mem2.cpp) and
 regressions where possible and target checks for 32-bit address behavior.
 
 * Guard `calloc(n, size)` multiplication before either heap is attempted.
-  Its MEM2 fallback currently multiplies unchecked and placement tests only
+  At the baseline, its MEM2 fallback multiplied unchecked and placement tested only
   `size`, rather than the complete allocation.
 * Give `realloc(p, 0)` one documented contract consistent across wrappers.
-  The MEM1 fallback can inspect/free `p` after a real zero-size realloc has
-  already freed it. MEM2 currently rounds zero to a small allocation; test
+  The baseline MEM1 fallback could inspect/free `p` after a real zero-size realloc
+  had already freed it. MEM2 rounded zero to a small allocation; test
   that difference explicitly. Failed nonzero realloc must retain the original.
 * Validate size rounding and arena arithmetic without overflowing or forming
   out-of-range pointers. Test pool boundaries, alignment, split/coalesce,
