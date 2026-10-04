@@ -1,5 +1,8 @@
 # Wii memory and cache measurements
 
+For the prioritized project changes, ownership policies and validation gates,
+see [the memory optimization plan](MEMORY-PLAN.md).
+
 The v0.1.5 benchmark passed **144 verified operations** on the physical Wii on
 2026-10-04, after the identical DOL passed Dolphin. UI/file checks, exit to HBC
 1.9.6 and restoration of original settings/probes also passed. All dev-Wii

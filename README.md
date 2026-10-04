@@ -62,7 +62,8 @@ Copy `build/release/boot.dol`, `HBC/meta.xml`, and `HBC/icon.png` to
 
 [ARCHIVES.md](ARCHIVES.md) documents archive safety, limits and regression coverage.
 [STORAGE.md](STORAGE.md) records native SD/USB speeds and partition recommendations.
-[MEMORY.md](MEMORY.md) describes memory capacities and the pending native MEM1/MEM2/LC benchmark.
+[MEMORY.md](MEMORY.md) records memory capacities and verified native MEM1/MEM2/LC measurements.
+[MEMORY-PLAN.md](MEMORY-PLAN.md) outlines memory placement, budgets and optimization validation.
 [DEBUGGING.md](DEBUGGING.md) describes isolated Dolphin tests, crash
 symbolization, and the shared development Wii queue. [CONTRIBUTING.md](CONTRIBUTING.md)
 contains the contributor workflow. [TRANSFERS.md](TRANSFERS.md) documents transfer
