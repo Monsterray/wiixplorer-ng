@@ -68,12 +68,13 @@ class RarcFile : public WiiArchive
 		//!Parse the archive
 		bool ParseFile();
 		bool ParseRarcHeader();
-		void ParseNode(RarcNode * Node, string & parentDirectory);
+		bool ParseNode(u32 index, const string &parentDirectory, unsigned depth);
 		//!Get the Filename
-		void GetFilename(int offset, string & Filename);
+		bool GetFilename(u64 offset, string &Filename);
 
-		RarcHeader Header;
-		int ItemIndex;
+		u32 NodeCount, EntryCount, VisitedEntries;
+		u64 NodesOffset, EntriesOffset, StringsOffset, StringsEnd, DataStart;
+		vector<u8> Seen;
 };
 
 #endif

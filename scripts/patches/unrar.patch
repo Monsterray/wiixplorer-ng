@@ -9,3 +9,49 @@
  
  #ifdef _OSF_SOURCE
    extern "C" int flock(int, int);
+--- a/suballoc.cpp
++++ b/suballoc.cpp
+@@ -78,6 +78,10 @@
+ bool SubAllocator::StartSubAllocator(int SASize)
+ {
++  // NG: untrusted PPM dictionaries must leave room for the application.
++  if (SASize<=0 || SASize>16)
++    return FALSE;
+   uint t=SASize << 20;
++  if (t>wx_archive_memory_budget()) return FALSE;
+   if (SubAllocatorSize == t)
+     return TRUE;
+   StopSubAllocator();
+--- a/unpack.cpp
++++ b/unpack.cpp
+@@ -1,4 +1,5 @@
+ #include "rar.hpp"
++extern "C" size_t wx_archive_memory_budget(void);
+ 
+ #include "coder.cpp"
+ #include "suballoc.cpp"
+--- a/model.cpp
++++ b/model.cpp
+@@ -532,7 +532,11 @@
+ void ModelPPM::CleanUp()
+ {
+   SubAlloc.StopSubAllocator();
+-  SubAlloc.StartSubAllocator(1);
++  if (!SubAlloc.StartSubAllocator(1))
++  {
++    MinContext=MaxContext=NULL;
++    return;
++  }
+   StartModelRare(2);
+ }
+ 
+--- a/suballoc.cpp
++++ b/suballoc.cpp
+@@ -86,6 +86,7 @@
+   // units: one as reserve for HeapEnd overflow checks and another
+   // to provide the space to correctly align UnitsStart.
+   uint AllocSize=t/FIXED_UNIT_SIZE*UNIT_SIZE+2*UNIT_SIZE;
++  if (AllocSize>wx_archive_memory_budget()) return FALSE;
+   if ((HeapStart=(byte *)rarmalloc(AllocSize)) == NULL)
+   {
+     ErrHandler.MemoryError();

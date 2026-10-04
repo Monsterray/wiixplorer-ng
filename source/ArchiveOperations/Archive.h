@@ -40,6 +40,7 @@ class ArchiveHandle
 		int AddFile(const char * filepath, const char *destpath, int compression);
 		//!Add a full directory into a destination path
 		int AddDirectory(const char * path, const char *destpath, int compression);
+		bool FinishWrite(bool success);
 		//!Extract a files from a zip file to a path
 		int ExtractFile(int ind, const char *destpath, bool withpath = false);
 		//!Extract all files from a zip file to a directory

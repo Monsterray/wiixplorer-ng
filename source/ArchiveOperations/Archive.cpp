@@ -35,13 +35,13 @@ ArchiveHandle::ArchiveHandle(const char  * filepath)
 	if(!file)
 		return;
 
-	int ret = 1;
-
-	while(checkbuffer[0] == 0 && ret > 0)
-		ret = fread(&checkbuffer, 1, 1, file);
-
-	fread(&checkbuffer[1], 1, 5, file);
-	fclose(file);
+    size_t got=fread(checkbuffer,1,sizeof(checkbuffer),file);
+    // IMET's signature follows its fixed 64-byte zero prefix. Avoid an
+    // unbounded scan of arbitrary zero-filled files and unaligned casts.
+    if(got==sizeof(checkbuffer) && !checkbuffer[0] && fseeko(file,64,SEEK_SET)==0)
+        got=fread(checkbuffer,1,sizeof(checkbuffer),file);
+    bool closed=fclose(file)==0;
+    if(got!=sizeof(checkbuffer) || !closed) return;
 
 	if(IsZipFile(checkbuffer))
 		zipFile = new ZipFile(filepath);
@@ -152,9 +152,14 @@ int ArchiveHandle::AddFile(const char * filepath, const char *destpath, int comp
 int ArchiveHandle::AddDirectory(const char * filepath, const char *destpath, int compression)
 {
 	if(zipFile)
-		return zipFile->AddDirectory(filepath, destpath, compression);
+		return zipFile->AddDirectory(filepath, destpath, compression, false);
 
 	return -30;
+}
+
+bool ArchiveHandle::FinishWrite(bool success)
+{
+    return zipFile && zipFile->FinishWrite(success);
 }
 
 int ArchiveHandle::ExtractFile(int ind, const char *destpath, bool withpath)
@@ -197,16 +202,9 @@ int ArchiveHandle::ExtractAll(const char * destpath)
 	return 0;
 }
 
-bool ArchiveHandle::IsZipFile (const char *buffer)
+bool ArchiveHandle::IsZipFile(const char *buffer)
 {
-	unsigned int *check;
-
-	check = (unsigned int *) buffer;
-
-	if (check[0] == 0x504b0304)
-		return true;
-
-	return false;
+    return !memcmp(buffer,"PK\003\004",4) || !memcmp(buffer,"PK\005\006",4);
 }
 
 bool ArchiveHandle::Is7ZipFile(const char *buffer)

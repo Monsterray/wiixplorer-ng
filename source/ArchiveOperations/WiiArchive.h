@@ -18,6 +18,7 @@
 #define _WIIARCHIVE_H_
 
 #include <string>
+#include <vector>
 #include "ArchiveStruct.h"
 
 using namespace std;
@@ -48,18 +49,20 @@ class WiiArchive
 
 	protected:
 		//!Add archive listname
-		void AddListEntrie(const char * filename, size_t length, size_t comp_length, bool isdir, u32 index, u64 modtime, u8 Type);
+		bool AddListEntrie(const char * filename, u64 length, u64 comp_length, bool isdir, u32 index, u64 modtime, u8 Type);
 		//!Clear the list
 		void ClearList();
 		//!Raw read from the file
-		size_t ReadFile(void * buffer, size_t size, off_t offset);
+		size_t ReadFile(void * buffer, size_t size, u64 offset);
 
+		int ExtractMember(int index,const char *dest,bool withpath,u8 *buffer,size_t capacity);
 		bool FromMem;
 		FILE * File;
 		u8 * FileBuffer;
-		u32 FileSize;
+		u64 FileSize;
+		size_t MetadataBytes;
 		vector<ArchiveFileStruct *> PathStructure;
-		vector<u32> BufferOffset;
+		vector<u64> BufferOffset;
 };
 
 #endif

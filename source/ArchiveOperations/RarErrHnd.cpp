@@ -65,7 +65,7 @@ void ErrorHandler::ReadError(const char *FileName)
 bool ErrorHandler::AskRepeatRead(const char *FileName)
 {
 	char output[200];
-	snprintf(output, sizeof(output), tr("Read Error in file: %s"), FileName);
+	if(snprintf(output,sizeof(output),tr("Read Error in file: %s"),FileName)>=(int)sizeof(output)) return false;
 
 	int choice = WindowPrompt(output, tr("Retry?"), tr("Yes"), tr("Cancel"));
 
@@ -81,7 +81,7 @@ void ErrorHandler::WriteError(const char *ArcName,const char *FileName)
 bool ErrorHandler::AskRepeatWrite(const char *FileName,bool DiskFull)
 {
 	char output[200];
-	snprintf(output, sizeof(output), tr("Write Error in file: %s. %s"), FileName, DiskFull ? tr("Disk is Full") : "");
+	if(snprintf(output,sizeof(output),tr("Write Error in file: %s. %s"),FileName,DiskFull ? tr("Disk is Full") : "")>=(int)sizeof(output)) return false;
 
 	int choice = WindowPrompt(output, tr("Retry?"), tr("Yes"), tr("Cancel"));
 
@@ -161,7 +161,7 @@ void ErrorHandler::ErrMsg(const char *ArcName,const char *fmt,...)
 	safebuf char Msg[NM+1024];
 	va_list argptr;
 	va_start(argptr,fmt);
-	vsprintf(Msg,fmt,argptr);
+	vsnprintf(Msg,sizeof(Msg),fmt,argptr);
 	va_end(argptr);
 	if (*Msg)
 	{

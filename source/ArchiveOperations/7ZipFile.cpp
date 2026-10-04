@@ -38,78 +38,72 @@ static const char * szerrormsg[10] = {
    tr("Process canceled."),
 };
 
-SzFile::SzFile(const char *filepath)
+#include <algorithm>
+#include <limits>
+#include <limits.h>
+
+union SzAllocationHeader { size_t size; long double alignment; };
+void *SzFile::BudgetAlloc(void *p,size_t size)
 {
-	memset(&CurArcFile, 0, sizeof(CurArcFile));
-
-	if(InFile_Open(&archiveStream.file, filepath))
-	{
-		SzResult = 9;
-		return;
-	}
-
-	FileInStream_CreateVTable(&archiveStream);
-	LookToRead_CreateVTable(&lookStream, False);
-
-	lookStream.realStream = &archiveStream.s;
-	LookToRead_Init(&lookStream);
-
-	// set default 7Zip SDK handlers for allocation and freeing memory
-	SzAllocImp.Alloc = SzAlloc;
-	SzAllocImp.Free = SzFree;
-	SzAllocTempImp.Alloc = SzAllocTemp;
-	SzAllocTempImp.Free = SzFreeTemp;
-
-	// prepare CRC and 7Zip database structures
-	CrcGenerateTable();
-	SzArEx_Init(&SzArchiveDb);
-
-	// open the archive
-	SzResult = SzArEx_Open(&SzArchiveDb, &lookStream.s, &SzAllocImp, &SzAllocTempImp);
-	if (SzResult != SZ_OK)
-	{
-		DisplayError(SzResult);
-	}
+    BudgetAllocator *allocator=(BudgetAllocator*)p;
+    if(!size || size>SIZE_MAX-sizeof(SzAllocationHeader) || *allocator->used>allocator->limit ||
+       size+sizeof(SzAllocationHeader)>allocator->limit-*allocator->used) return NULL;
+    SzAllocationHeader *header=(SzAllocationHeader*)malloc(size+sizeof(*header));
+    if(!header) return NULL;
+    header->size=size+sizeof(*header); *allocator->used+=header->size;
+    return header+1;
 }
-
+void SzFile::BudgetFree(void *p,void *address)
+{
+    if(!address) return;
+    SzAllocationHeader *header=(SzAllocationHeader*)address-1;
+    BudgetAllocator *allocator=(BudgetAllocator*)p;
+    *allocator->used-=header->size; free(header);
+}
+SzFile::SzFile(const char *path): SzResult(SZ_ERROR_FAIL),Allocated(0),Decoded(NULL),DecodedSize(0),SzBlockIndex(0xffffffff)
+{
+    memset(&CurArcFile,0,sizeof(CurArcFile));
+    File_Construct(&archiveStream.file); SzArEx_Init(&SzArchiveDb);
+    MainAlloc.api.Alloc=TempAlloc.api.Alloc=BudgetAlloc;
+    MainAlloc.api.Free=TempAlloc.api.Free=BudgetFree;
+    MainAlloc.used=TempAlloc.used=&Allocated;
+    MainAlloc.limit=TempAlloc.limit=std::min<size_t>(WX_ARCHIVE_METADATA,wx_archive_memory_budget());
+    struct stat input;
+    if(!path || stat(path,&input)!=0 || input.st_size<0 || (u64)input.st_size>(u64)LONG_MAX || InFile_Open(&archiveStream.file,path)) { SzResult=9; return; }
+    FileInStream_CreateVTable(&archiveStream);
+    LookToRead_CreateVTable(&lookStream,False);
+    lookStream.realStream=&archiveStream.s; LookToRead_Init(&lookStream);
+    CrcGenerateTable();
+    SzResult=SzArEx_Open(&SzArchiveDb,&lookStream.s,&MainAlloc.api,&TempAlloc.api);
+    if(SzResult==SZ_OK && SzArchiveDb.db.NumFiles>WX_ARCHIVE_ITEMS) SzResult=SZ_ERROR_MEM;
+    if(SzResult==SZ_OK) {
+        for(unsigned i=0;i<SzArchiveDb.db.NumFiles;++i) {
+            if(!GetFileStruct(i)) { SzResult=SZ_ERROR_DATA; break; }
+        }
+    }
+    if(SzResult!=SZ_OK) DisplayError(SzResult);
+}
+void SzFile::FreeDecoded()
+{
+    IAlloc_Free(&MainAlloc.api,Decoded); Decoded=NULL; DecodedSize=0; SzBlockIndex=0xffffffff;
+}
 SzFile::~SzFile()
 {
-	SzArEx_Free(&SzArchiveDb, &SzAllocImp);
-
-	File_Close(&archiveStream.file);
-
-	if(CurArcFile.filename != NULL)
-		free(CurArcFile.filename);
+    FreeDecoded(); SzArEx_Free(&SzArchiveDb,&MainAlloc.api);
+    File_Close(&archiveStream.file); free(CurArcFile.filename);
 }
-
-char *SzFile::GetUtf8Filename(int ind)
+char *SzFile::GetUtf8Filename(int index)
 {
-	if(ind > (int) SzArchiveDb.db.NumFiles || ind < 0)
-		return NULL;
-
-	char *filename = NULL;
-
-	int len = SzArEx_GetFileNameUtf16(&SzArchiveDb, ind, 0);
-	if (len != 0)
-	{
-		UInt16 *utf16Name = (UInt16 *)SzAlloc(NULL, len * sizeof(UInt16));
-		if(!utf16Name)
-			return NULL;
-
-		SzArEx_GetFileNameUtf16(&SzArchiveDb, ind, utf16Name);
-
-		wString wName;
-		wName.reserve(len);
-
-		for(int i = 0; i < len; i++)
-			wName.push_back(utf16Name[i]);
-
-		SzFree(NULL, utf16Name);
-
-		filename = strdup(wName.toUTF8().c_str());
-	}
-
-	return filename;
+    if(SzResult!=SZ_OK || index<0 || (unsigned)index>=SzArchiveDb.db.NumFiles) return NULL;
+    size_t length=SzArEx_GetFileNameUtf16(&SzArchiveDb,index,NULL);
+    if(!length || length>WX_ARCHIVE_PATH) return NULL;
+    UInt16 name[WX_ARCHIVE_PATH];
+    if(SzArEx_GetFileNameUtf16(&SzArchiveDb,index,name)!=length || name[length-1]!=0) return NULL;
+    wString wide;
+    for(size_t i=0;i+1<length;++i) { if(!name[i]) return NULL; wide.push_back(name[i]); }
+    std::string utf=wide.toUTF8();
+    if(!wx_archive_member(utf.c_str())) return NULL;
+    return strdup(utf.c_str());
 }
 
 bool SzFile::Is7ZipFile (const char *buffer)
@@ -123,34 +117,26 @@ bool SzFile::Is7ZipFile (const char *buffer)
 	return true; // 7z archive found
 }
 
-ArchiveFileStruct * SzFile::GetFileStruct(int ind)
+ArchiveFileStruct *SzFile::GetFileStruct(int index)
 {
-	if(ind > (int) SzArchiveDb.db.NumFiles || ind < 0)
-		return NULL;
-
-	char *filename = GetUtf8Filename(ind);
-
-	if(CurArcFile.filename != NULL)
-		free(CurArcFile.filename);
-
-	const CSzFileItem * SzFileItem = SzArchiveDb.db.Files + ind;
-	CurArcFile.filename = filename ? filename : strdup("");
-	CurArcFile.length = SzFileItem->Size;
-	CurArcFile.comp_length = 0;
-	CurArcFile.isdir = SzFileItem->IsDir;
-	CurArcFile.fileindex = ind;
-	if(SzFileItem->MTimeDefined)
-		CurArcFile.ModTime = (u64) (SzFileItem->MTime.Low  | ((u64) SzFileItem->MTime.High << 32));
-	else
-		CurArcFile.ModTime = 0;
-	CurArcFile.archiveType = SZIP;
-
-	return &CurArcFile;
+    if(SzResult!=SZ_OK || index<0 || (unsigned)index>=SzArchiveDb.db.NumFiles) return NULL;
+    const CSzFileItem *item=SzArchiveDb.db.Files+index;
+    unsigned type=item->Attrib>>16 & 0170000;
+    if((item->IsDir && item->Size) || item->IsAnti || (item->AttribDefined && ((item->Attrib&0x408) ||
+       (type && type!=(item->IsDir ? 0040000u : 0100000u))))) return NULL;
+    char *name=GetUtf8Filename(index);
+    if(!name) return NULL;
+    free(CurArcFile.filename); CurArcFile.filename=name;
+    CurArcFile.length=item->Size; CurArcFile.comp_length=0;
+    CurArcFile.isdir=item->IsDir; CurArcFile.fileindex=index;
+    CurArcFile.ModTime=item->MTimeDefined ? (u64)item->MTime.Low | ((u64)item->MTime.High<<32) : 0;
+    CurArcFile.archiveType=SZIP;
+    return &CurArcFile;
 }
 
 void SzFile::DisplayError(SRes res)
 {
-	const char *cpErrString = (res > 0 && res) < 10 ? szerrormsg[(res - 1)] : "";
+	const char *cpErrString = (res > 0 && res < 10) ? szerrormsg[(res - 1)] : "";
 	ThrowMsg(tr("7z decompression failed:"), "%s %i: %s", tr("Error"), res, cpErrString);
 }
 
@@ -162,144 +148,47 @@ u32 SzFile::GetItemCount()
 	return SzArchiveDb.db.NumFiles;
 }
 
-int SzFile::ExtractFile(int fileindex, const char * outpath, bool withpath)
+int SzFile::ExtractMember(int index,const char *root,bool withpath)
 {
-	if(SzResult != SZ_OK)
-		return -1;
-
-	if(!GetFileStruct(fileindex))
-		return -2;
-
-	// reset variables
-	UInt32 SzBlockIndex = 0xFFFFFFFF;
-	size_t SzOffset = 0;
-	size_t SzSizeProcessed = 0;
-	Byte * outBuffer = 0;
-	size_t outBufferSize = 0;
-
-	char * RealFilename = strrchr(CurArcFile.filename, '/');
-
-	char writepath[MAXPATHLEN];
-	if(!RealFilename || withpath)
-		snprintf(writepath, sizeof(writepath), "%s/%s", outpath, CurArcFile.filename);
-	else
-		snprintf(writepath, sizeof(writepath), "%s/%s", outpath, RealFilename+1);
-
-	if(CurArcFile.isdir)
-	{
-		strncat(writepath, "/", sizeof(writepath));
-		CreateSubfolder(writepath);
-		return 1;
-	}
-
-	char * temppath = strdup(writepath);
-	char * pointer = strrchr(temppath, '/');
-	if(pointer)
-	{
-		pointer += 1;
-		pointer[0] = '\0';
-	}
-	CreateSubfolder(temppath);
-
-	free(temppath);
-	temppath = NULL;
-
-	//startup timer
-	ShowProgress(0, CurArcFile.length, (RealFilename ? RealFilename+1 : CurArcFile.filename));
-
-	// Extract
-	SzResult = SzArEx_Extract(&SzArchiveDb, &lookStream.s, fileindex,
-								&SzBlockIndex, &outBuffer, &outBufferSize,
-								&SzOffset, &SzSizeProcessed,
-								&SzAllocImp, &SzAllocTempImp);
-
-	if(ProgressWindow::Instance()->IsCanceled())
-		SzResult = 10;
-
-	if(SzResult == SZ_OK)
-	{
-		FILE * wFile = fopen(writepath, "wb");
-
-		//not quite right and needs to be changed
-		u32 done = 0;
-		if(!wFile)
-			done = CurArcFile.length;
-
-		do
-		{
-			ShowProgress(done, CurArcFile.length, (RealFilename ? RealFilename+1 : CurArcFile.filename));
-			int wrote = fwrite(outBuffer, 1, 51200, wFile);
-			done += wrote;
-
-			if(wrote == 0)
-				break;
-
-		} while(done < CurArcFile.length);
-
-		fclose(wFile);
-	}
-	if(outBuffer)
-	{
-		IAlloc_Free(&SzAllocImp, outBuffer);
-		outBuffer = NULL;
-	}
-
-	// finish up the progress for this file
-	FinishProgress(CurArcFile.length);
-
-	// check for errors
-	if(SzResult != SZ_OK)
-	{
-		// display error message
-		DisplayError(SzResult);
-		return -4;
-	}
-
-	return 1;
+    if(!GetFileStruct(index)) return -1;
+    if(wx_archive_cancelled()) return PROGRESS_CANCELED;
+    char path[WX_ARCHIVE_PATH];
+    if(!wx_archive_path(path,sizeof(path),root,CurArcFile.filename,withpath)) return -1;
+    if(CurArcFile.isdir) return wx_archive_directory(path) ? 1 : -1;
+    if(!wx_archive_representable(root,CurArcFile.length) || CurArcFile.length>SIZE_MAX) return -1; // SDK returns an in-memory size_t slice.
+    size_t offset=0,size=0;
+    ShowProgress(0,CurArcFile.length,CurArcFile.filename);
+    SRes result=SzArEx_Extract(&SzArchiveDb,&lookStream.s,index,&SzBlockIndex,&Decoded,&DecodedSize,
+                              &offset,&size,&MainAlloc.api,&TempAlloc.api);
+    if(wx_archive_cancelled()) return PROGRESS_CANCELED;
+    if(result!=SZ_OK || size!=CurArcFile.length || offset>DecodedSize || size>DecodedSize-offset || (size && !Decoded)) {
+        if(result!=SZ_OK) DisplayError(result);
+        return -1;
+    }
+    ArchiveOutput output;
+    if(!output.Begin(root,CurArcFile.filename,withpath)) return -1;
+    size_t done=0,next=0;
+    while(done<size) {
+        if(wx_archive_cancelled()) return PROGRESS_CANCELED;
+        if(done>=next) { ShowProgress(done,CurArcFile.length,CurArcFile.filename); next=done+256*1024; }
+        size_t chunk=std::min<size_t>(51200,size-done);
+        if(fwrite(Decoded+offset+done,1,chunk,output.file)!=chunk) return -1;
+        done+=chunk;
+    }
+    if(wx_archive_cancelled()) return PROGRESS_CANCELED;
+    if(!output.Commit()) return -1;
+    FinishProgress(CurArcFile.length); return 1;
 }
-
-int SzFile::ExtractAll(const char * destpath)
+int SzFile::ExtractFile(int index,const char *root,bool withpath)
 {
-	if(!destpath)
-		return -5;
-
-	for(u32 i = 0; i < SzArchiveDb.db.NumFiles; i++)
-	{
-		if(ProgressWindow::Instance()->IsCanceled())
-			return PROGRESS_CANCELED;
-
-		CSzFileItem * SzFileItem = SzArchiveDb.db.Files + i;
-
-		char *tmpName = GetUtf8Filename(i);
-
-		char path[MAXPATHLEN];
-
-		if(tmpName) {
-			snprintf(path, sizeof(path), "%s/%s", destpath, tmpName);
-			free(tmpName);
-		}
-		else
-			snprintf(path, sizeof(path), "%s", destpath);
-
-		u32 filesize = SzFileItem->Size;
-
-		if(!filesize)
-			continue;
-
-		char * pointer = strrchr(path, '/')+1;
-
-		if(pointer)
-		{
-			//cut off filename
-			pointer[0] = '\0';
-		}
-		else
-			continue; //shouldn't ever happen but to be sure, skip the file if it does
-
-		CreateSubfolder(path);
-
-		ExtractFile(i, path);
-	}
-
-	return 1;
+    MainAlloc.limit=TempAlloc.limit=std::min<size_t>(16u*1024u*1024u,Allocated+wx_archive_memory_budget());
+    int result=ExtractMember(index,root,withpath); FreeDecoded(); return result;
+}
+int SzFile::ExtractAll(const char *root)
+{
+    if(SzResult!=SZ_OK || !ArchivePreflight(*this,root)) return -1;
+    MainAlloc.limit=TempAlloc.limit=std::min<size_t>(16u*1024u*1024u,Allocated+wx_archive_memory_budget());
+    int result=1;
+    for(unsigned i=0;i<GetItemCount() && result>0;++i) result=ExtractMember(i,root,true);
+    FreeDecoded(); return result;
 }

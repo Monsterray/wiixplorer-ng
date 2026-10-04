@@ -77,3 +77,13 @@ Four core files are vendored from ITotalJustice/ftpsrv 1.2.2, commit
 Its MIT notices, archive hash and complete local patch are recorded in
 [UPSTREAM.md](source/FTPOperations/ftpsrv/UPSTREAM.md). The adapter builds against
 official libogc and DeviceHandler. See [FTP.md](FTP.md).
+
+## Archive safety patches
+
+The archive block retains the same pinned upstream snapshots. `zip.patch` now
+propagates seek failures and accepts a valid empty ZIP end record at offset zero
+while still verifying its signature. `unrar.patch` bounds PPM dictionary requests
+and handles failed cleanup allocation. `ntfs.patch` and `ext2fs.patch` add
+no-follow `lstat_r` callbacks; normal stat/open behavior is unchanged. These
+patches are rebuilt by `make deps` and covered by host regression tests. See
+[ARCHIVES.md](ARCHIVES.md) for adapter limits and pending native validation.

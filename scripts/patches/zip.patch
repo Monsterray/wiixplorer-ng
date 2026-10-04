@@ -58,3 +58,53 @@
      unsigned long crcForCrypting;
  {
      int n;                       /* index in random header */
+--- a/source/ioapi.c
++++ b/source/ioapi.c
+@@ -145,8 +145,7 @@
+         break;
+     default: return -1;
+     }
+-    ret = 0;
+-    fseek((FILE *)stream, offset, fseek_origin);
++    ret = fseek((FILE *)stream, offset, fseek_origin);
+     return ret;
+ }
+ 
+--- a/source/unzip.c
++++ b/source/unzip.c
+@@ -428,15 +428,13 @@
+         return NULL;
+ 
+     central_pos = unzlocal_SearchCentralDir(&us.z_filefunc,us.filestream);
+-    if (central_pos==0)
+-        err=UNZ_ERRNO;
+ 
+     if (ZSEEK(us.z_filefunc, us.filestream,
+                                       central_pos,ZLIB_FILEFUNC_SEEK_SET)!=0)
+         err=UNZ_ERRNO;
+ 
+     /* the signature, already checked */
+-    if (unzlocal_getLong(&us.z_filefunc, us.filestream,&uL)!=UNZ_OK)
++    if (unzlocal_getLong(&us.z_filefunc, us.filestream,&uL)!=UNZ_OK || uL!=0x06054b50)
+         err=UNZ_ERRNO;
+ 
+     /* number of this disk */
+--- a/source/zip.c
++++ b/source/zip.c
+@@ -561,15 +561,13 @@
+         uLong size_comment;
+ 
+         central_pos = ziplocal_SearchCentralDir(&ziinit.z_filefunc,ziinit.filestream);
+-        if (central_pos==0)
+-            err=ZIP_ERRNO;
+ 
+         if (ZSEEK(ziinit.z_filefunc, ziinit.filestream,
+                                         central_pos,ZLIB_FILEFUNC_SEEK_SET)!=0)
+             err=ZIP_ERRNO;
+ 
+         /* the signature, already checked */
+-        if (ziplocal_getLong(&ziinit.z_filefunc, ziinit.filestream,&uL)!=ZIP_OK)
++        if (ziplocal_getLong(&ziinit.z_filefunc, ziinit.filestream,&uL)!=ZIP_OK || uL!=0x06054b50)
+             err=ZIP_ERRNO;
+ 
+         /* number of this disk */

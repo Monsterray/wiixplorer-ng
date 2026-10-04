@@ -101,6 +101,9 @@ $(OUTPUT).dol: $(OUTPUT).elf
 debug release:
 	$(MAKE) CONFIG=$@ all
 check:
+	CXX="$(HOST_CXX)" python3 tests/archives.py
+	CXX="$(HOST_CXX)" python3 tests/archive_fs.py
+	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/archive_codecs.py
 	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/regression.py
 	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/stability.py
 	python3 tests/dolphin_process.py

@@ -18,6 +18,7 @@
 #define _7ZIPFILE_H_
 
 #include "ArchiveStruct.h"
+#include "ArchiveSafety.h"
 
 extern "C" {
 #include <sevenzip/7z.h>
@@ -53,8 +54,15 @@ class SzFile
 		CFileInStream archiveStream;
 		CLookToRead lookStream;
 		CSzArEx SzArchiveDb;
-		ISzAlloc SzAllocImp;
-		ISzAlloc SzAllocTempImp;
+		struct BudgetAllocator { ISzAlloc api; size_t *used; size_t limit; };
+		static void *BudgetAlloc(void *p,size_t size);
+		static void BudgetFree(void *p,void *address);
+		void FreeDecoded();
+		int ExtractMember(int index,const char *root,bool withpath);
+		BudgetAllocator MainAlloc,TempAlloc;
+		size_t Allocated;
+		Byte *Decoded;
+		size_t DecodedSize;
 		UInt32 SzBlockIndex;
 		CSzFileItem * SzFileItem;
 };

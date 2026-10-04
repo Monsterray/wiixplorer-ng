@@ -27,6 +27,7 @@
 #include "Prompts/PopUpMenu.h"
 #include "FileStartUp/FileStartUp.h"
 #include "FileOperations/fileops.h"
+#include "ArchiveOperations/ArchiveSafety.h"
 #include "FileOperations/CopyTask.h"
 #include "FileOperations/MoveTask.h"
 #include "FileOperations/DeleteTask.h"
@@ -259,10 +260,7 @@ void Explorer::ProcessChoice(int choice)
 			return;
 
 		char DestZipPath[MAXPATHLEN];
-		snprintf(DestZipPath, sizeof(DestZipPath), "%s", browser->GetCurrentPath());
-		if(DestZipPath[strlen(DestZipPath)-1] != '/')
-			strncat(DestZipPath, "/", sizeof(DestZipPath));
-		strncat(DestZipPath, tr("NewZip.zip"), sizeof(DestZipPath));
+        if(!wx_archive_path(DestZipPath,sizeof(DestZipPath),browser->GetCurrentPath(),tr("NewZip.zip"),true)) return;
 
 		if(!OnScreenKeyboard(DestZipPath, sizeof(DestZipPath)))
 			return;
@@ -272,7 +270,7 @@ void Explorer::ProcessChoice(int choice)
 		if(pos != std::string::npos)
 			DestPath.erase(pos);
 
-		CreateSubfolder(DestPath.c_str());
+		if(!wx_archive_directory(DestPath.empty() ? "." : DestPath.c_str())) { ShowError(tr("Cannot create archive directory.")); return; }
 
 		//append selected Item
 		browser->MarkCurrentItem();

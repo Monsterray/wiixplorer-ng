@@ -102,3 +102,93 @@
  
  #endif /* _NTFSFILE_H */
  
+--- a/source/ntfsinternal.c
++++ b/source/ntfsinternal.c
+@@ -292,7 +292,7 @@
+ 
+     // If the entry was found and it has reparse data then parse its true path;
+     // this resolves the true location of symbolic links and directory junctions
+-    if (ni && (ni->flags & FILE_ATTR_REPARSE_POINT)) {
++    if (reparseLevel>=0 && ni && (ni->flags & FILE_ATTR_REPARSE_POINT)) {
+         if (ntfs_possible_symlink(ni)) {
+ 
+             // Sanity check, give up if we are parsing to deep
+--- a/source/ntfsdir.c
++++ b/source/ntfsdir.c
+@@ -634,3 +634,54 @@
+ 
+     return 0;
+ }
++
++
++int ntfs_lstat_r (struct _reent *r, const char *path, struct stat *st)
++{
++    // Short circuit cases were we don't actually have to do anything
++    if (!st || !path)
++        return 0;
++
++    ntfs_log_trace("path %s, st %p\n", path, st);
++
++    ntfs_vd *vd = NULL;
++    ntfs_inode *ni = NULL;
++
++    // Get the volume descriptor for this path
++    vd = ntfsGetVolume(path);
++    if (!vd) {
++        r->_errno = ENODEV;
++        return -1;
++    }
++
++    if(strcmp(path, ".") == 0 || strcmp(path, "..") == 0)
++    {
++        memset(st, 0, sizeof(struct stat));
++        st->st_mode = S_IFDIR;
++        return 0;
++    }
++
++    // Lock
++    ntfsLock(vd);
++
++    // Find the entry
++    ni = ntfsParseEntry(vd, path, -1);
++    if (!ni) {
++        r->_errno = errno;
++        ntfsUnlock(vd);
++        return -1;
++    }
++
++    // Get the entry stats
++    int ret = ntfsStat(vd, ni, st);
++    if (!ret && (ni->flags & FILE_ATTR_REPARSE_POINT)) st->st_mode = S_IFLNK;
++    if (ret)
++        r->_errno = errno;
++
++    // Close the entry
++    ntfsCloseEntry(vd, ni);
++
++    ntfsUnlock(vd);
++
++    return ret;
++}
+--- a/source/ntfsdir.h
++++ b/source/ntfsdir.h
+@@ -50,6 +50,7 @@
+ void ntfsCloseDir (ntfs_dir_state *file);
+ 
+ /* Gekko devoptab directory routines for NTFS-based devices */
++extern int ntfs_lstat_r (struct _reent *r, const char *path, struct stat *st);
+ extern int ntfs_stat_r (struct _reent *r, const char *path, struct stat *st);
+ extern int ntfs_link_r (struct _reent *r, const char *existing, const char *newLink);
+ extern int ntfs_unlink_r (struct _reent *r, const char *name);
+--- a/source/ntfs.c
++++ b/source/ntfs.c
+@@ -64,7 +64,8 @@
+     ntfs_statvfs_r,
+     ntfs_ftruncate_r,
+     ntfs_fsync_r,
+-    NULL /* Device data */
++    NULL /* Device data */,
++    NULL, NULL, NULL, ntfs_lstat_r
+ };
+ 
+ void ntfsInit (void)

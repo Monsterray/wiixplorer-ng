@@ -80,8 +80,7 @@ class U8Archive : public WiiArchive
 		//!Parse the archive
 		bool ParseFile();
 		bool ParseU8Header(u32 U8HeaderOffset);
-		//!Get the U8Filename
-		void U8Filename(const U8Entry * fst, int fstoffset, int i, string & Filename);
+
 };
 
 #endif

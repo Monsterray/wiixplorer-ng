@@ -94,7 +94,7 @@ class ArchiveBrowser : public Browser
 	private:
 		int EnterSelDir();
 		int LeaveCurDir();
-		void AddListEntrie(const char * filename, size_t length, size_t comp_length, bool isdir, u32 index, u64 modtime, u8 archiveType);
+		void AddListEntrie(const char * filename, u64 length, u64 comp_length, bool isdir, u32 index, u64 modtime, u8 archiveType);
 		bool InDirectoryTree(const char * Path, const char * itemFullFilename, bool firstpage);
 		static void *ParseThreadCallback(void *arg);
 

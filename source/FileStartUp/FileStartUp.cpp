@@ -45,6 +45,8 @@
 #include "MPlayerArguements.h"
 #include "WiiMCArguemnts.h"
 #include "Tools/uncompress.h"
+#include "ArchiveOperations/ArchiveSafety.h"
+#include <limits.h>
 
 int FileStartUp(const char *filepath)
 {
@@ -130,20 +132,20 @@ int FileStartUp(const char *filepath)
 		if(!f)
 			return -1;
 
-		u32 magic = 0;
-		fread(&magic, 1, 4, f);
-		if(magic == 'IMD5')
-		{
-			fseek(f, 0, SEEK_END);
-			int filesize = ftell(f);
-			u8 * buffer = (u8 *) malloc(filesize);
-			rewind(f);
-			fread(buffer, 1, filesize, f);
-			fclose(f);
-			magic = CheckIMD5Type(buffer, filesize);
-			free(buffer);
-		}
-		fclose(f);
+        u32 magic=0;
+        bool okay=fread(&magic,1,4,f)==4;
+        if(okay && magic=='IMD5') {
+            okay=fseeko(f,0,SEEK_END)==0;
+            off_t size=okay ? ftello(f) : -1;
+            okay=size>=4 && (u64)size<=wx_archive_memory_budget() && size<=INT_MAX && fseeko(f,0,SEEK_SET)==0;
+            u8 *buffer=okay ? (u8*)malloc((size_t)size) : NULL;
+            if(!buffer) okay=false;
+            if(okay) okay=fread(buffer,1,(size_t)size,f)==(size_t)size;
+            if(okay) magic=CheckIMD5Type(buffer,(int)size);
+            free(buffer);
+        }
+        if(fclose(f)!=0) okay=false;
+        if(!okay) return -1;
 
 		if(magic == 'RIFF' || magic == 'FORM' || magic == 'BNS ')
 		{

@@ -22,6 +22,7 @@
 #include <zip/zip.h>
 #include <zip/unzip.h>
 #include "ArchiveStruct.h"
+#include "ArchiveSafety.h"
 
 class ZipFile
 {
@@ -35,7 +36,7 @@ class ZipFile
 		//!Add a file to the zip file
 		int AddFile(const char *filepath, const char *destfilepath, int compresslevel = Z_DEFAULT_COMPRESSION, bool RefreshList = true);
 		//!Add a directory to the zip file with all of it's content
-		int AddDirectory(const char *dirpath, const char *destfilepath, int compresslevel = Z_DEFAULT_COMPRESSION);
+		int AddDirectory(const char *dirpath, const char *destfilepath, int compresslevel = Z_DEFAULT_COMPRESSION, bool RefreshList = true);
 		//!Extract a files from a zip file to a path
 		int ExtractFile(int ind, const char *dest, bool withpath = false);
 		//!Extract all files from a zip file to a directory
@@ -51,10 +52,16 @@ class ZipFile
 			OPEN,
 			APPEND,
 		};
+		bool FinishWrite(bool success);
 	private:
+		int ExtractMember(int ind,const char *dest,bool withpath,void *buffer,size_t capacity);
+		int WalkDirectory(const char *source,const char *member,int level,unsigned depth,unsigned &count,const struct stat *known = NULL);
+		bool AppendMetadata(const char *name,u64 size,u64 packed,bool dir,u32 index,u64 time);
 		bool SeekFile(int ind);
-		void PathControl();
-		void CheckMissingPath(const char * path);
+		bool LoadListInternal();
+		bool OwnOutput(const char *path) const;
+		int AddMember(const char *source,const char *member,int level,bool refresh,const struct stat *known);
+		bool PathControl();
 		void ClearList();
 		bool SwitchMode(short mode);
 
@@ -62,6 +69,13 @@ class ZipFile
 		unzFile uzFile;
 		short OpenMode;
 		int RealArchiveItemCount;
+		ArchiveOutput *WriteOutput;
+		u8 *IOBuffer;
+		bool WriteFailed;
+		bool ListValid;
+		u64 WrittenBound;
+		unsigned WrittenItems;
+		size_t MetadataBytes;
 		std::string ZipFilePath;
 		std::vector<ArchiveFileStruct *> ZipStructure;
 };

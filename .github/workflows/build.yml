@@ -12,6 +12,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - run: python3 tests/archives.py
+      - run: python3 tests/archive_fs.py
       - run: python3 tests/regression.py
       - run: python3 tests/stability.py
       - run: python3 tests/dolphin_process.py

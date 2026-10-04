@@ -24,17 +24,20 @@
 #include "FileOperations/fileops.h"
 #include "Tools/uncompress.h"
 #include "U8Archive.h"
+#include "ArchiveSafety.h"
+#include <new>
+#include <algorithm>
 
 U8Archive::U8Archive(const char *filepath)
 	: WiiArchive(filepath)
 {
-	ParseFile();
+	try { ParseFile(); } catch(const std::bad_alloc &) { CloseFile(); }
 }
 
 U8Archive::U8Archive(const u8 * Buffer, u32 Size)
 	: WiiArchive(Buffer, Size)
 {
-	ParseFile();
+	try { ParseFile(); } catch(const std::bad_alloc &) { CloseFile(); }
 }
 
 U8Archive::~U8Archive()
@@ -44,172 +47,80 @@ U8Archive::~U8Archive()
 
 bool U8Archive::ParseFile()
 {
-	if(!FileBuffer && !File)
-		return false;
-
-	ClearList();
-
-	IMETHeader IMET_Header;
-	ReadFile(&IMET_Header, sizeof(IMETHeader), 0);
-
-	IMD5Header IMD5_Header;
-	memcpy(&IMD5_Header, &IMET_Header, sizeof(IMD5Header));
-	U8Header U8_Header;
-	memcpy(&U8_Header, &IMET_Header, sizeof(U8Header));
-	u32 U8HeaderOffset = 0;
-
-	//It's opening.bnr
-	if (IMET_Header.fcc == 'IMET')
-	{
-		//Add header.imet as a file
-		AddListEntrie("header.imet", sizeof(IMETHeader), sizeof(IMETHeader), false, 0, 0, U8Arch);
-		BufferOffset.push_back(0);
-
-		U8HeaderOffset = sizeof(IMETHeader);
-
-		return ParseU8Header(U8HeaderOffset);
-	}
-
-	//It's icon.bin/banner.bin/sound.bin
-	else if(IMD5_Header.fcc == 'IMD5')
-	{
-		FileSize = IMD5_Header.filesize;
-		u32 LZ77Magic = 0;
-		U8HeaderOffset = sizeof(IMD5Header);
-		ReadFile(&LZ77Magic, sizeof(u32), U8HeaderOffset);
-
-		if(LZ77Magic == 'LZ77')
-		{
-			FileSize -= sizeof(IMD5Header);
-			u8 * BinBuffer = (u8 *) malloc(FileSize);
-			if(!BinBuffer)
-				return false;
-
-			ReadFile(BinBuffer, FileSize, U8HeaderOffset);
-
-			u8 * UncBinBuffer = uncompressLZ77(BinBuffer, FileSize, &FileSize);
-			if(!UncBinBuffer)
-				return false;
-
-			u32 tmpSize = FileSize;
-			free(BinBuffer);
-			CloseFile();
-
-			FileBuffer = UncBinBuffer;
-			FileSize = tmpSize;
-			FromMem = true;
-			U8HeaderOffset = 0;
-		}
-
-		return ParseU8Header(U8HeaderOffset);
-	}
-	//It's a direct U8Archive...weird but oh well...
-	else if(U8_Header.fcc == 0x55AA382D /* U.8- */)
-	{
-		return ParseU8Header(0);
-	}
-
-	//Unknown U8Archive
-	CloseFile();
-
-	return false;
+    ClearList();
+    u8 header[sizeof(IMETHeader)]={0};
+    if(FileSize<4 || ReadFile(header,(size_t)std::min<u64>(FileSize,sizeof(header)),0)==0) return false;
+    bool okay=false;
+    if(FileSize>=sizeof(IMETHeader) && !memcmp(header+64,"IMET",4)) {
+        if(AddListEntrie("header.imet",sizeof(IMETHeader),sizeof(IMETHeader),false,0,0,U8Arch)) {
+            BufferOffset.push_back(0);
+            okay=ParseU8Header(sizeof(IMETHeader));
+        }
+    } else if(!memcmp(header,"IMD5",4)) {
+        u64 declared=wx_archive_be32(header+4);
+        if(FileSize<36 || declared>FileSize-32) { CloseFile(); return false; }
+        if(!memcmp(header+32,"LZ77",4)) {
+            u64 input=FileSize-32;
+            u32 output=header[37]|((u32)header[38]<<8)|((u32)header[39]<<16);
+            if(FileSize<40 || input>SIZE_MAX || input+output>wx_archive_memory_budget()) { CloseFile(); return false; }
+            u8 *compressed=(u8*)malloc((size_t)input);
+            u32 decodedSize=0;
+            u8 *decoded=NULL;
+            if(compressed && ReadFile(compressed,(size_t)input,32)==input)
+                decoded=uncompressLZ77(compressed,(u32)input,&decodedSize);
+            free(compressed);
+            CloseFile();
+            if(!decoded) return false;
+            FileBuffer=decoded; FileSize=decodedSize; FromMem=true;
+            okay=ParseU8Header(0);
+        } else okay=ParseU8Header(32);
+    } else if(wx_archive_be32(header)==0x55aa382d) okay=ParseU8Header(0);
+    if(!okay) CloseFile();
+    return okay;
 }
 
-bool U8Archive::ParseU8Header(u32 U8HeaderOffset)
+bool U8Archive::ParseU8Header(u32 base)
 {
-	u32 U8Magic;
-	ReadFile(&U8Magic, sizeof(u32), U8HeaderOffset);
-
-	if(U8Magic != 0x55AA382D /* U.8- */)
-	{
-		CloseFile();
-		return false;
-	}
-
-	u32 rootNodeOffset = 0;
-	ReadFile(&rootNodeOffset, sizeof(u32), U8HeaderOffset+sizeof(u32));
-
-	u32 fstOffset = U8HeaderOffset + rootNodeOffset;
-	U8Entry * MainFST = (U8Entry *) malloc(sizeof(U8Entry));
-	if(!MainFST)
-	{
-		CloseFile();
-		return false;
-	}
-
-	ReadFile(MainFST, sizeof(U8Entry), fstOffset);
-
-	u32 fstNums = MainFST[0].numEntries;
-	U8Entry * fst = (U8Entry *) realloc(MainFST, fstNums*sizeof(U8Entry));
-	if(!fst)
-	{
-		free(MainFST);
-		CloseFile();
-		return false;
-	}
-
-	ReadFile(fst, fstNums*sizeof(U8Entry), fstOffset);
-
-	char filename[MAXPATHLEN];
-	char directory[MAXPATHLEN];
-	strcpy(directory, "");
-	u32 dir_stack[100];
-	int dir_index = 0;
-
-	for (u32 i = 1; i < fstNums; ++i)
-	{
-		string RealFilename;
-		U8Filename(fst, fstOffset, i, RealFilename);
-		snprintf(filename, sizeof(filename), "%s%s", directory, RealFilename.c_str());
-
-		bool isDir = (fst[i].fileType == 0) ? false : true;
-
-		if(isDir)
-		{
-			dir_stack[++dir_index] = fst[i].numEntries;
-			char tmp[MAXPATHLEN];
-			snprintf(tmp, sizeof(tmp), "%s/", RealFilename.c_str());
-			strncat(directory, tmp, sizeof(directory));
-		}
-
-		AddListEntrie(filename, fst[i].fileLength, fst[i].fileLength, isDir, GetItemCount(), 0, U8Arch);
-		BufferOffset.push_back(U8HeaderOffset+fst[i].fileOffset);
-
-		while (dir_stack[dir_index] == i+1 && dir_index > 0)
-		{
-			if(directory[strlen(directory)-1] == '/')
-				directory[strlen(directory)-1] = '\0';
-
-			char * ptr = strrchr(directory, '/');
-			if(ptr)
-			{
-				ptr++;
-				ptr[0] = '\0';
-			}
-			else
-			{
-				directory[0] = '\0';
-			}
-			dir_index--;
-		}
-	}
-
-	free(fst);
-
-	return true;
-}
-
-void U8Archive::U8Filename(const U8Entry * fst, int fstoffset, int i, string & Filename)
-{
-	u32 nameoffset = fstoffset+fst[0].numEntries*sizeof(U8Entry)+fst[i].nameOffset;
-	int n = -1;
-	char Char;
-
-	do
-	{
-		n++;
-		ReadFile(&Char, 1, nameoffset+n);
-		Filename.push_back(Char);
-	}
-	while(Char != 0 && nameoffset+n < FileSize);
+    u8 header[32],root[12];
+    if(ReadFile(header,sizeof(header),base)!=sizeof(header) || wx_archive_be32(header)!=0x55aa382d) return false;
+    u64 fst=(u64)base+wx_archive_be32(header+4);
+    u64 end=fst+wx_archive_be32(header+8),data=(u64)base+wx_archive_be32(header+12);
+    if(fst<(u64)base+32 || end>FileSize || data<end || data>FileSize || ReadFile(root,12,fst)!=12) return false;
+    u32 count=wx_archive_be32(root+8);
+    if(root[0]!=1 || wx_archive_be32(root+4)!=0 || !count || count>WX_ARCHIVE_ITEMS ||
+       (u64)count*12>end-fst) return false;
+    u64 strings=fst+(u64)count*12;
+    // Bounded iterative directory stack: end indices and prefix lengths.
+    u32 ends[WX_ARCHIVE_DEPTH+1]={count},parents[WX_ARCHIVE_DEPTH+1]={0};
+    size_t lengths[WX_ARCHIVE_DEPTH+1]={0};
+    unsigned depth=0;
+    string prefix;
+    for(u32 i=1;i<count;++i) {
+        while(depth && i==ends[depth]) { prefix.resize(lengths[depth]); --depth; }
+        if(i>=ends[depth]) return false;
+        u8 entry[12];
+        if(ReadFile(entry,12,fst+(u64)i*12)!=12 || entry[0]>1) return false;
+        u32 nameOffset=wx_archive_be32(entry)&0xffffff;
+        u64 position=strings+nameOffset;
+        if(position>=end) return false;
+        string name;
+        for(;position<end && name.size()<255;++position) {
+            char c;
+            if(ReadFile(&c,1,position)!=1) return false;
+            if(!c) break;
+            name+=c;
+        }
+        char zero=1;
+        if(position>=end || ReadFile(&zero,1,position)!=1 || zero || !wx_archive_member(name.c_str()) || name.find('/')!=string::npos) return false;
+        string path=prefix+name;
+        bool directory=entry[0]==1;
+        u32 offset=wx_archive_be32(entry+4),length=wx_archive_be32(entry+8);
+        if(directory) {
+            if(offset!=parents[depth] || length<=i || length>ends[depth] || depth+1>=WX_ARCHIVE_DEPTH) return false;
+        } else if((u64)base+offset<data || (u64)base+offset>FileSize || length>FileSize-((u64)base+offset)) return false;
+        if(!AddListEntrie(path.c_str(),directory ? 0 : length,directory ? 0 : length,directory,GetItemCount(),0,U8Arch)) return false;
+        BufferOffset.push_back(directory ? 0 : (u64)base+offset);
+        if(directory) { ++depth; ends[depth]=length; parents[depth]=i; lengths[depth]=prefix.size(); prefix=path+"/"; }
+    }
+    return true;
 }

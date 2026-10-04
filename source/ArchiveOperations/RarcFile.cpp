@@ -24,17 +24,19 @@
 #include "FileOperations/fileops.h"
 #include "Tools/uncompress.h"
 #include "RarcFile.h"
+#include "ArchiveSafety.h"
+#include <new>
 
 RarcFile::RarcFile(const char *filepath)
 	: WiiArchive(filepath)
 {
-	ParseFile();
+	try { ParseFile(); } catch(const std::bad_alloc &) { CloseFile(); }
 }
 
 RarcFile::RarcFile(const u8 * Buffer, u32 Size)
 	: WiiArchive(Buffer, Size)
 {
-	ParseFile();
+	try { ParseFile(); } catch(const std::bad_alloc &) { CloseFile(); }
 }
 
 RarcFile::~RarcFile()
@@ -44,150 +46,86 @@ RarcFile::~RarcFile()
 
 bool RarcFile::ParseFile()
 {
-	if(!FileBuffer && !File)
-		return false;
-
-	ClearList();
-
-	ReadFile(&Header, sizeof(RarcHeader), 0);
-
-	Yaz0_Header Yaz0_Head;
-	memcpy(&Yaz0_Head, &Header, sizeof(Yaz0_Header));
-
-	if(Yaz0_Head.magic == 'Yaz0')
-	{
-		if(!FileBuffer)
-		{
-			FileBuffer = (u8 *) malloc(FileSize);
-			if(!FileBuffer)
-			{
-				CloseFile();
-				return false;
-			}
-			ReadFile(FileBuffer, FileSize, 0);
-			FromMem = true;
-		}
-
-		FileSize = Yaz0_Head.decompressed_size;
-
-		u8 * buff = (u8 *) malloc(FileSize);
-		if(!buff)
-		{
-			CloseFile();
-			return false;
-		}
-
-		uncompressYaz0(FileBuffer, buff, FileSize);
-
-		CloseFile();
-
-		FromMem = true;
-		FileBuffer = buff;
-
-		return ParseRarcHeader();
-	}
-	else if(Header.magic == 'RARC')
-	{
-		return ParseRarcHeader();
-	}
-
-	//Unknown RarcFile
-	CloseFile();
-
-	return false;
+    ClearList();
+    u8 header[16];
+    if(ReadFile(header,16,0)!=16) return false;
+    if(!memcmp(header,"Yaz0",4)) {
+        u32 size=wx_archive_be32(header+4);
+        if(!size || FileSize>SIZE_MAX || FileSize+size>wx_archive_memory_budget()) { CloseFile(); return false; }
+        u32 input=(u32)FileSize;
+        u8 *compressed=(u8*)malloc(input),*decoded=(u8*)malloc(size);
+        bool okay=compressed && decoded && ReadFile(compressed,input,0)==input && uncompressYaz0(compressed,input,decoded,size);
+        free(compressed); CloseFile();
+        if(!okay) { free(decoded); return false; }
+        FileBuffer=decoded; FileSize=size; FromMem=true;
+    }
+    if(!ParseRarcHeader()) { CloseFile(); return false; }
+    return true;
 }
 
 bool RarcFile::ParseRarcHeader()
 {
-	ReadFile(&Header, sizeof(RarcHeader), 0);
-
-	if(Header.magic != 'RARC')
-	{
-		CloseFile();
-		return false;
-	}
-
-	FileSize = Header.size;
-
-	RarcNode RootNode;
-
-	ReadFile(&RootNode, sizeof(RarcNode), sizeof(RarcHeader));
-
-	ItemIndex = 0;
-
-	string ItemPath;
-	ParseNode(&RootNode, ItemPath);
-
-	return true;
+    u8 h[64];
+    if(ReadFile(h,64,0)!=64 || memcmp(h,"RARC",4)) return false;
+    u64 declared=wx_archive_be32(h+4);
+    NodeCount=wx_archive_be32(h+32); EntryCount=wx_archive_be32(h+40);
+    NodesOffset=32ull+wx_archive_be32(h+36);
+    EntriesOffset=32ull+wx_archive_be32(h+44);
+    StringsOffset=32ull+wx_archive_be32(h+52);
+    StringsEnd=StringsOffset+wx_archive_be32(h+48);
+    DataStart=32ull+wx_archive_be32(h+12);
+    if(declared<64 || declared>FileSize || !NodeCount || NodeCount>WX_ARCHIVE_ITEMS || EntryCount>WX_ARCHIVE_ITEMS ||
+       NodesOffset<64 || NodesOffset+(u64)NodeCount*16>EntriesOffset || EntriesOffset<64 ||
+       EntriesOffset+(u64)EntryCount*20>StringsOffset || StringsOffset<64 || StringsEnd>declared ||
+       DataStart<StringsEnd || DataStart>declared) return false;
+    FileSize=declared;
+    Seen.assign(NodeCount,0); VisitedEntries=0;
+    return ParseNode(0,"",0);
 }
 
-void RarcFile::ParseNode(RarcNode * Node, string & parentDirectory)
+bool RarcFile::GetFilename(u64 offset,string &name)
 {
-	u32 StringOffset = Header.stringTableOffset+0x20;
-	u32 DataOffset = Header.dataStartOffset+0x20;
-	u32 CurrOffset = Header.fileEntriesOffset+0x20+Node->firstFileEntryOffset*sizeof(RarcFileEntry);
-
-	//I love recursion... :P
-	string parent_dir = parentDirectory;
-	string ItemName;
-	GetFilename(StringOffset+Node->filenameOffset, ItemName);
-
-	if(parent_dir.size() == 0)
-	{
-		parent_dir = ItemName;
-	}
-	else
-	{
-		//It's just awesome...
-		parent_dir.assign(fmt("%s/%s", parentDirectory.c_str(), ItemName.c_str()));
-	}
-
-	ItemName.clear();
-
-	AddListEntrie(parent_dir.c_str(), 0, 0, true, ItemIndex++, 0, ArcArch);
-	BufferOffset.push_back(0);
-
-	for(u16 i = 0; i < Node->numFileEntries; i++)
-	{
-		RarcFileEntry FileEntry;
-		ReadFile(&FileEntry, sizeof(RarcFileEntry), CurrOffset);
-
-		GetFilename(StringOffset+FileEntry.filenameOffset, ItemName);
-
-		u32 filelength = FileEntry.dataSize;
-
-		/* It's a dir... */
-		if(FileEntry.id == 0xFFFF)
-		{
-			if(strcmp(ItemName.c_str(), ".") != 0 && strcmp(ItemName.c_str(), "..") != 0)
-			{
-				RarcNode DirNode;
-				ReadFile(&DirNode, sizeof(RarcNode), sizeof(RarcHeader)+sizeof(RarcNode)*FileEntry.dataOffset);
-				ParseNode(&DirNode, parent_dir);
-			}
-		}
-		/* It's a file... */
-		else
-		{
-			AddListEntrie(fmt("%s/%s", parent_dir.c_str(), ItemName.c_str()), filelength, filelength, false, ItemIndex++, 0, ArcArch);
-			BufferOffset.push_back(DataOffset+FileEntry.dataOffset);
-		}
-
-		ItemName.clear();
-		CurrOffset += sizeof(RarcFileEntry);
-	}
+    name.clear();
+    if(offset<StringsOffset || offset>=StringsEnd) return false;
+    while(offset<StringsEnd && name.size()<=255) {
+        char c;
+        if(ReadFile(&c,1,offset++)!=1) return false;
+        if(!c) return !name.empty();
+        name+=c;
+    }
+    return false;
 }
 
-void RarcFile::GetFilename(int offset, string & Filename)
+bool RarcFile::ParseNode(u32 index,const string &parent,unsigned depth)
 {
-	int n = -1;
-	char Char = 0;
-
-	do
-	{
-		n++;
-		ReadFile(&Char, 1, offset+n);
-		Filename.push_back(Char);
-	}
-	while((Char != 0) && (offset+n < (int) FileSize));
+    if(index>=NodeCount || depth>=WX_ARCHIVE_DEPTH || Seen[index]) return false;
+    Seen[index]=1; // Reject cycles and repeated node aliases, including completed nodes.
+    u8 node[16];
+    if(ReadFile(node,16,NodesOffset+(u64)index*16)!=16) return false;
+    u32 first=wx_archive_be32(node+12),count=wx_archive_be16(node+10);
+    if(first>EntryCount || count>EntryCount-first || count>WX_ARCHIVE_ITEMS-VisitedEntries) return false;
+    VisitedEntries+=count;
+    string name;
+    if(!GetFilename(StringsOffset+wx_archive_be32(node+4),name) || !wx_archive_member(name.c_str()) || name.find('/')!=string::npos) return false;
+    string path=parent.empty() ? name : parent+"/"+name;
+    if(!AddListEntrie(path.c_str(),0,0,true,GetItemCount(),0,ArcArch)) return false;
+    BufferOffset.push_back(0);
+    for(u32 i=0;i<count;++i) {
+        u8 entry[20];
+        if(ReadFile(entry,20,EntriesOffset+(u64)(first+i)*20)!=20 ||
+           !GetFilename(StringsOffset+wx_archive_be16(entry+6),name)) return false;
+        u32 offset=wx_archive_be32(entry+8),size=wx_archive_be32(entry+12);
+        if(wx_archive_be16(entry)==0xffff) {
+            if(offset>=NodeCount) return false;
+            if(name=="." || name=="..") continue; // Structural RARC parent/self entries.
+            if(!wx_archive_member(name.c_str()) || name.find('/')!=string::npos || !ParseNode(offset,path,depth+1)) return false;
+        } else {
+            if(!wx_archive_member(name.c_str()) || name.find('/')!=string::npos ||
+               DataStart+offset>FileSize || size>FileSize-(DataStart+offset)) return false;
+            string child=path+"/"+name;
+            if(!AddListEntrie(child.c_str(),size,size,false,GetItemCount(),0,ArcArch)) return false;
+            BufferOffset.push_back((u32)(DataStart+offset));
+        }
+    }
+    return true;
 }

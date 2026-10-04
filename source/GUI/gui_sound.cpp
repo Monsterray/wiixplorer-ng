@@ -350,6 +350,7 @@ void GuiSound::Rewind()
 
 void GuiSound::UncompressSoundbin(const u8 * snd, int len, bool isallocated)
 {
+	if(!snd || len<36) { if(isallocated) free((u8*)snd); return; }
 	const u8 * file = snd+32;
 	if(*((u32 *) file) == 'LZ77')
 	{
@@ -361,7 +362,8 @@ void GuiSound::UncompressSoundbin(const u8 * snd, int len, bool isallocated)
 	{
 		length = len-32;
 		sound = (u8 *) malloc(length);
-		memcpy(sound, file, length);
+		if(sound) memcpy(sound, file, length);
+		else length=0;
 	}
 
 	if(isallocated)

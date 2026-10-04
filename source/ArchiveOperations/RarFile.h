@@ -45,7 +45,9 @@ class RarFile
 		bool CheckPassword();
 		bool SeekFile(int index);
 		void UnstoreFile(ComprDataIO &DataIO, int64 DestUnpSize);
-		int InternalExtractFile(const char * outpath, bool withpath);
+		int InternalExtractFile(int index, const char *outpath, bool withpath);
+		bool ListValid;
+		byte *StoreBuffer;
 		Archive RarArc;
 
 		std::vector<ArchiveFileStruct *> RarStructure;

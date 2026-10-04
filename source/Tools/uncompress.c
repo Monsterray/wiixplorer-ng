@@ -28,158 +28,85 @@
 
 #include "uncompress.h"
 
-struct _LZ77Info
+// NG alteration: all input/output accesses and dictionary runs are bounded.
+#include "ArchiveOperations/ArchiveSafety.h"
+
+static u32 read_be32(const u8 *p)
 {
-	u16 length : 4;
-	u16 offset : 12;
-} __attribute__((packed));
-
-typedef struct _LZ77Info LZ77Info;
-
-u8 * uncompressLZ77(const u8 *inBuf, u32 inLength, u32 * size)
-{
-	u8 *buffer = NULL;
-	if (inLength <= 0x8 || *((const u32 *)inBuf) != 0x4C5A3737 /*"LZ77"*/ || inBuf[4] != 0x10)
-		return NULL;
-
-	u32 uncSize = le32(((const u32 *)inBuf)[1] << 8);
-
-	const u8 *inBufEnd = inBuf + inLength;
-	inBuf += 8;
-
-	buffer = (u8 *) malloc(uncSize);
-
-	if (!buffer)
-		return buffer;
-
-	u8 *bufCur = buffer;
-	u8 *bufEnd = buffer + uncSize;
-
-	while (bufCur < bufEnd && inBuf < inBufEnd)
-	{
-		u8 flags = *inBuf;
-		++inBuf;
-		int i = 0;
-		for (i = 0; i < 8 && bufCur < bufEnd && inBuf < inBufEnd; ++i)
-		{
-			if ((flags & 0x80) != 0)
-			{
-				const LZ77Info  * info = (const LZ77Info *)inBuf;
-				inBuf += sizeof (LZ77Info);
-				int length = info->length + 3;
-				if (bufCur - info->offset - 1 < buffer || bufCur + length > bufEnd)
-					return buffer;
-				memcpy(bufCur, bufCur - info->offset - 1, length);
-				bufCur += length;
-			}
-			else
-			{
-				*bufCur = *inBuf;
-				++inBuf;
-				++bufCur;
-			}
-			flags <<= 1;
-		}
-	}
-
-	*size = uncSize;
-
-	return buffer;
+    return ((u32)p[0]<<24)|((u32)p[1]<<16)|((u32)p[2]<<8)|p[3];
 }
 
-//Thanks to _demo_ for this function
-//src points to the yaz0 source data (to the "real" source data, not at the header!)
-//dst points to a buffer uncompressedSize bytes large (you get uncompressedSize from
-//the second 4 bytes in the Yaz0 header).
-void uncompressYaz0(const u8* srcBuf, u8* dst, int uncompressedSize)
+u8 *uncompressLZ77(const u8 *in,u32 length,u32 *size)
 {
-	const u8 * src = srcBuf;
-
-	if(memcmp(src, "Yaz0", 4) == 0)
-	{
-		src += sizeof(Yaz0_Header);
-	}
-
-	int srcPlace = 0, dstPlace = 0; //current read/write positions
-
-	u32 validBitCount = 0; //number of valid bits left in "code" byte
-	u8 currCodeByte = 0;
-
-	while(dstPlace < uncompressedSize)
-	{
-		//read new "code" byte if the current one is used up
-		if(validBitCount == 0)
-		{
-			currCodeByte = src[srcPlace];
-			++srcPlace;
-			validBitCount = 8;
-		}
-
-		if((currCodeByte & 0x80) != 0)
-		{
-			//straight copy
-			dst[dstPlace] = src[srcPlace];
-			dstPlace++;
-			srcPlace++;
-		}
-		else
-		{
-			//RLE part
-			u8 byte1 = src[srcPlace];
-			u8 byte2 = src[srcPlace + 1];
-			srcPlace += 2;
-
-			u32 dist = ((byte1 & 0xF) << 8) | byte2;
-			u32 copySource = dstPlace - (dist + 1);
-
-			u32 numBytes = byte1 >> 4;
-			if(numBytes == 0)
-			{
-				numBytes = src[srcPlace] + 0x12;
-				srcPlace++;
-			}
-			else
-				numBytes += 2;
-
-			//copy run
-			u32 i = 0;
-			for(i = 0; i < numBytes; ++i)
-			{
-				dst[dstPlace] = dst[copySource];
-				copySource++;
-				dstPlace++;
-			}
-		}
-
-		//use next bit from "code" byte
-		currCodeByte <<= 1;
-		validBitCount-=1;
-	}
+    if(size) *size=0;
+    if(!in || !size || length<8 || memcmp(in,"LZ77",4) || in[4]!=0x10) return NULL;
+    u32 total=in[5]|((u32)in[6]<<8)|((u32)in[7]<<16);
+    if(!total || total>wx_archive_memory_budget()) return NULL;
+    u8 *out=(u8*)malloc(total);
+    if(!out) return NULL;
+    u32 src=8,dst=0;
+    while(dst<total) {
+        if(src>=length) goto fail;
+        u8 flags=in[src++];
+        for(unsigned bit=0;bit<8 && dst<total;++bit,flags<<=1) {
+            if(flags&0x80) {
+                if(length-src<2) goto fail;
+                unsigned run=(in[src]>>4)+3;
+                unsigned distance=(((in[src]&15)<<8)|in[src+1])+1;
+                src+=2;
+                if(distance>dst || run>total-dst) goto fail;
+                // Forward byte copies implement overlapping LZ dictionary runs.
+                while(run--) { out[dst]=out[dst-distance]; ++dst; }
+            } else {
+                if(src>=length) goto fail;
+                out[dst++]=in[src++];
+            }
+        }
+    }
+    *size=total;
+    return out;
+fail:
+    free(out);
+    return NULL;
 }
 
-
-u32 CheckIMD5Type(const u8 * buffer, int length)
+int uncompressYaz0(const u8 *in,u32 length,u8 *out,u32 total)
 {
-	if(*((u32 *) buffer) != 'IMD5')
-	{
-		return *((u32 *) buffer);
-	}
+    if(!in || !out || length<16 || memcmp(in,"Yaz0",4) || read_be32(in+4)!=total) return 0;
+    u32 src=16,dst=0;
+    while(dst<total) {
+        if(src>=length) return 0;
+        u8 flags=in[src++];
+        for(unsigned bit=0;bit<8 && dst<total;++bit,flags<<=1) {
+            if(flags&0x80) {
+                if(src>=length) return 0;
+                out[dst++]=in[src++];
+            } else {
+                if(length-src<2) return 0;
+                unsigned run=in[src]>>4;
+                unsigned distance=(((in[src]&15)<<8)|in[src+1])+1;
+                src+=2;
+                if(!run) { if(src>=length) return 0; run=in[src++]+18; }
+                else run+=2;
+                if(distance>dst || run>total-dst) return 0;
+                while(run--) { out[dst]=out[dst-distance]; ++dst; }
+            }
+        }
+    }
+    return 1;
+}
 
-	const u8 * file = buffer+32;
-
-	if(*((u32 *) file) != 'LZ77')
-	{
-		return *((u32 *) file);
-	}
-
-	u32 uncSize = 0;
-	u8 * uncompressed_data = uncompressLZ77(file, length-32, &uncSize);
-	if(!uncompressed_data)
-		return 0;
-
-	u32 * magic = (u32 *) uncompressed_data;
-	u32 Type = magic[0];
-	free(uncompressed_data);
-
-	return Type;
+u32 CheckIMD5Type(const u8 *buffer,int length)
+{
+    if(!buffer || length<4) return 0;
+    if(memcmp(buffer,"IMD5",4)) return read_be32(buffer);
+    if(length<36) return 0;
+    const u8 *file=buffer+32;
+    if(memcmp(file,"LZ77",4)) return read_be32(file);
+    u32 size=0;
+    u8 *out=uncompressLZ77(file,length-32,&size);
+    if(!out) return 0;
+    u32 type=size>=4 ? read_be32(out) : 0;
+    free(out);
+    return type;
 }

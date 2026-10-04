@@ -60,6 +60,7 @@ Copy `build/release/boot.dol`, `HBC/meta.xml`, and `HBC/icon.png` to
 `make run` opens an isolated Dolphin profile. Set `DOLPHIN_EXE` or
 `DOLPHIN_APP` if Dolphin is installed elsewhere.
 
+[ARCHIVES.md](ARCHIVES.md) documents archive safety, limits and regression coverage.
 [STORAGE.md](STORAGE.md) records native SD/USB speeds and partition recommendations.
 [MEMORY.md](MEMORY.md) describes memory capacities and the pending native MEM1/MEM2/LC benchmark.
 [DEBUGGING.md](DEBUGGING.md) describes isolated Dolphin tests, crash

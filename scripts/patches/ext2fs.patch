@@ -92,3 +92,146 @@
  {
      ext2_log_trace("fd %p\n", (void *) fd);
  
+--- a/source/ext2_internal.c
++++ b/source/ext2_internal.c
+@@ -53,7 +53,8 @@
+     ext2_statvfs_r,
+     ext2_ftruncate_r,
+     ext2_fsync_r,
+-    NULL /* Device data */
++    NULL /* Device data */,
++    NULL, NULL, NULL, ext2_lstat_r
+ };
+ 
+ 
+@@ -226,7 +227,7 @@
+     LWP_MutexDestroy(vd->lock);
+ }
+ 
+-static ext2_ino_t ext2PathToInode(ext2_vd *vd, const char * path)
++static ext2_ino_t ext2PathToInode(ext2_vd *vd, const char * path, bool follow)
+ {
+     //Sanity check
+     if(!vd || !path)
+@@ -250,7 +251,8 @@
+ 
+         filename[i] = '\0';
+ 
+-        errorcode = ext2fs_namei_follow(vd->fs, vd->root, parent, filename, &ino);
++        errorcode = follow ? ext2fs_namei_follow(vd->fs, vd->root, parent, filename, &ino) :
++            ext2fs_namei(vd->fs, vd->root, parent, filename, &ino);
+         if(errorcode != EXT2_ET_OK)
+             return 0;
+ 
+@@ -264,7 +266,7 @@
+     return ino;
+ }
+ 
+-ext2_inode_t *ext2OpenEntry (ext2_vd *vd, const char *path)
++static ext2_inode_t *ext2OpenEntryEx (ext2_vd *vd, const char *path, bool follow)
+ {
+     errcode_t errorcode = 0;
+     ext2_inode_t * ni = 0;
+@@ -290,7 +292,7 @@
+ 	memset(ni, 0, sizeof(ext2_inode_t));
+ 
+     // Find the entry, taking into account our current directory (if any)
+-    ni->ino = ext2PathToInode(vd, path);
++    ni->ino = ext2PathToInode(vd, path, follow);
+     if(ni->ino == 0)
+     {
+         errno = ENOENT;
+@@ -308,6 +310,17 @@
+ 
+     return ni;
+ }
++
++ext2_inode_t *ext2OpenEntry (ext2_vd *vd, const char *path)
++{
++    return ext2OpenEntryEx(vd, path, true);
++}
++
++ext2_inode_t *ext2OpenEntryNoFollow (ext2_vd *vd, const char *path)
++{
++    return ext2OpenEntryEx(vd, path, false);
++}
++
+ 
+ void ext2CloseEntry(ext2_vd *vd, ext2_inode_t * ni)
+ {
+--- a/source/ext2_internal.h
++++ b/source/ext2_internal.h
+@@ -89,6 +89,7 @@
+ const devoptab_t *ext2GetDevice (const char *path);
+ 
+ ext2_inode_t *ext2OpenEntry (ext2_vd *vd, const char *path);
++ext2_inode_t *ext2OpenEntryNoFollow (ext2_vd *vd, const char *path);
+ void ext2CloseEntry (ext2_vd *vd, ext2_inode_t * ni);
+ int ext2Stat (ext2_vd *vd, ext2_inode_t * ni, struct stat *st);
+ int ext2Sync (ext2_vd *vd, ext2_inode_t * ni);
+--- a/source/ext2dir.c
++++ b/source/ext2dir.c
+@@ -655,3 +655,53 @@
+ 
+     return 0;
+ }
++
++
++int ext2_lstat_r (struct _reent *r, const char *path, struct stat *st)
++{
++    // Short circuit cases were we don't actually have to do anything
++    if (!st || !path)
++        return 0;
++
++    ext2_log_trace("path %s, st %p\n", path, st);
++
++    ext2_vd *vd = NULL;
++    ext2_inode_t *ni = NULL;
++
++    // Get the volume descriptor for this path
++    vd = ext2GetVolume(path);
++    if (!vd) {
++        r->_errno = ENODEV;
++        return -1;
++    }
++
++    if(strcmp(path, ".") == 0 || strcmp(path, "..") == 0)
++    {
++        memset(st, 0, sizeof(struct stat));
++        st->st_mode = S_IFDIR;
++        return 0;
++    }
++
++    // Lock
++    ext2Lock(vd);
++
++    // Find the entry
++    ni = ext2OpenEntryNoFollow(vd, path);
++    if (!ni) {
++        r->_errno = errno;
++        ext2Unlock(vd);
++        return -1;
++    }
++
++    // Get the entry stats
++    int ret = ext2Stat(vd, ni, st);
++    if (ret)
++        r->_errno = errno;
++
++    // Close the entry
++    ext2CloseEntry(vd, ni);
++
++    ext2Unlock(vd);
++
++    return ret;
++}
+--- a/source/ext2dir.h
++++ b/source/ext2dir.h
+@@ -51,6 +51,7 @@
+ void ext2CloseDir (ext2_dir_state *file);
+ 
+ /* Gekko devoptab directory routines for EXT2-based devices */
++extern int ext2_lstat_r (struct _reent *r, const char *path, struct stat *st);
+ extern int ext2_stat_r (struct _reent *r, const char *path, struct stat *st);
+ extern int ext2_link_r (struct _reent *r, const char *existing, const char *newLink);
+ extern int ext2_unlink_r (struct _reent *r, const char *name);

@@ -22,8 +22,8 @@
 typedef struct
 {
 	char * filename; // full filename
-	size_t length; // uncompressed file length in 64 bytes for sizes higher than 4GB
-	size_t comp_length; // compressed file length in 64 bytes for sizes higher than 4GB
+	u64 length; // uncompressed byte length; never truncate through 32-bit size_t
+	u64 comp_length; // compressed byte length
 	bool isdir; // 0 - file, 1 - directory
 	u32 fileindex; // fileindex number
 	u64 ModTime; // modification time

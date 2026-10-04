@@ -42,7 +42,7 @@ typedef struct
 } Yaz0_Header;
 
 u8 * uncompressLZ77(const u8 *inBuf, u32 inLength, u32 * uncSize);
-void uncompressYaz0(const u8* srcBuf, u8* dst, int uncompressedSize);
+int uncompressYaz0(const u8* srcBuf, u32 sourceLength, u8* dst, u32 uncompressedSize);
 u32 CheckIMD5Type(const u8 * buffer, int length);
 
 

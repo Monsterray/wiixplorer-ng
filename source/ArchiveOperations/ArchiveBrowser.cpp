@@ -22,6 +22,8 @@
 
 #include "Controls/Application.h"
 #include "ArchiveBrowser.h"
+#include "ArchiveSafety.h"
+#include <new>
 #include "Prompts/PromptWindows.h"
 #include "Prompts/ProgressWindow.h"
 #include "Prompts/ThrobberWindow.h"
@@ -42,7 +44,7 @@ ArchiveBrowser::ArchiveBrowser(const char * filepath)
 	OrigArchiveFilename = NULL;
 	strcpy(currentPath, "");
 
-	if(!filepath)
+	if(!filepath || strlen(filepath)>=sizeof(currentPath))
 		return;
 
 	ThrobberWindow * Prompt = new ThrobberWindow(tr("Reading archive."), tr("Please wait..."));
@@ -50,11 +52,11 @@ ArchiveBrowser::ArchiveBrowser(const char * filepath)
 	Application::Instance()->Append(Prompt);
 	Application::Instance()->SetUpdateOnly(Prompt);
 
-	char * tmp = strrchr(filepath, '/')+1;
-	OrigArchiveFilename = new char[strlen(tmp)+1];
-	sprintf(OrigArchiveFilename, "%s", tmp);
-
-	snprintf(currentPath, sizeof(currentPath), "%s", filepath);
+	const char *tmp=strrchr(filepath,'/'); tmp=tmp ? tmp+1 : filepath;
+	OrigArchiveFilename=new(std::nothrow) char[strlen(tmp)+1];
+    if(!OrigArchiveFilename) { Application::Instance()->PushForDelete(Prompt); return; }
+    strcpy(OrigArchiveFilename,tmp);
+    strcpy(currentPath,filepath);
 
 	lwp_t parsethread = LWP_THREAD_NULL;
 	if(LWP_CreateThread(&parsethread, ParseThreadCallback, this, 0, 32708, 100) < 0)
@@ -135,14 +137,6 @@ int ArchiveBrowser::ExecuteFile(const char *filepath)
 	if(choice == 0)
 		return -1;
 
-	if(strlen(Settings.TempPath) > 0 && Settings.TempPath[strlen(Settings.TempPath)-1] != '/')
-		strcat(Settings.TempPath, "/");
-
-	if(!CreateSubfolder(Settings.TempPath))
-	{
-		ShowError("Can't create temp directory.");
-		return -1;
-	}
 
 	StartProgress(tr("Extracting item(s):"));
 	int result = ExtractItem(index, Settings.TempPath);
@@ -154,7 +148,7 @@ int ArchiveBrowser::ExecuteFile(const char *filepath)
 	}
 
 	char exePath[MAXPATHLEN];
-	snprintf(exePath, sizeof(exePath), "%s%s", Settings.TempPath, PathStructure.at(index)->filename);
+    if(!wx_archive_path(exePath,sizeof(exePath),Settings.TempPath,PathStructure.at(index)->filename,false)) return -1;
 
 	return FileStartUp(exePath);
 }
@@ -164,10 +158,9 @@ int ArchiveBrowser::AddItem(const ItemStruct * Item, const char * arc_filepath, 
 	if(!Item || !archive)
 		return -1;
 
-	if(Item->isdir)
-		return archive->AddDirectory(Item->itempath, arc_filepath, compression);
-
-	return archive->AddFile(Item->itempath, arc_filepath, compression);
+	int result=Item->isdir ? archive->AddDirectory(Item->itempath,arc_filepath,compression) : archive->AddFile(Item->itempath,arc_filepath,compression);
+    if(!archive->FinishWrite(result>0) && result>0) result=-1;
+    return result;
 }
 
 int ArchiveBrowser::ExtractItem(int ind, const char * dest)
@@ -184,50 +177,28 @@ int ArchiveBrowser::ExtractItem(int ind, const char * dest)
 		return ExtractFolder(currentItem->filename, dest);
 	}
 
-	return archive->ExtractFile(currentItem->fileindex, dest, false);
+	return archive->ExtractFile(PathStructure.at(ind)->fileindex, dest, false);
 }
 
-int ArchiveBrowser::ExtractFolder(const char *name, const char * dest)
+int ArchiveBrowser::ExtractFolder(const char *name,const char *dest)
 {
-	int result = 0;
-	char foldername[strlen(name)+1];
-	snprintf(foldername, sizeof(foldername), "%s", name);
-
-	char * RealName = strrchr(foldername, '/');
-
-	for (u32 i = 0; i < ItemNumber; i++)
-	{
-		ArchiveFileStruct * TmpArchive = archive->GetFileStruct(i);
-		if(!TmpArchive)
-			continue;
-
-		//Filter all not to the path belonging files and folders
-		if(strncasecmp(foldername, TmpArchive->filename, strlen(foldername)) == 0)
-		{
-			char realdest[MAXPATHLEN];
-			snprintf(realdest, sizeof(realdest), "%s/%s", dest, TmpArchive->filename);
-
-			if(RealName)
-			{
-				char * pathptr = strstr(TmpArchive->filename, RealName+1);
-				if(pathptr)
-					snprintf(realdest, sizeof(realdest), "%s/%s", dest, pathptr);
-			}
-
-			//Strip filename from folder7
-			char * stripPtr = strrchr(realdest, '/');
-			if(stripPtr)
-			{
-				stripPtr += 1;
-				stripPtr[0] = '\0';
-			}
-			result = archive->ExtractFile(TmpArchive->fileindex, realdest, false);
-			if(result <= 0)
-				break;
-		}
-	}
-
-	return result;
+    if(!archive || !wx_archive_member(name)) return -1;
+    std::string folder=name; // 7z GetFileStruct() replaces its transient filename.
+    size_t slash=folder.rfind('/');
+    size_t start=slash==std::string::npos ? 0 : slash+1;
+    int result=1;
+    for(unsigned i=0;i<ItemNumber;++i) {
+        ArchiveFileStruct *item=archive->GetFileStruct(i);
+        if(!item) return -1;
+        const char *member=item->filename;
+        if(strncmp(member,folder.c_str(),folder.size()) || (member[folder.size()] && member[folder.size()]!='/')) continue;
+        char path[WX_ARCHIVE_PATH];
+        if(!wx_archive_path(path,sizeof(path),dest,member+start,true)) return -1;
+        char *last=strrchr(path,'/'); if(!last) return -1; last[1]=0;
+        result=archive->ExtractFile(i,path,false);
+        if(result<0) return result;
+    }
+    return result;
 }
 
 int ArchiveBrowser::ExtractAll(const char * dest)
@@ -263,17 +234,13 @@ bool ArchiveBrowser::IsDir(int ind)
 
 int ArchiveBrowser::EnterSelDir()
 {
-	int dirlength = strlen(currentPath);
-	int filelength = strlen(PathStructure.at(SelIndex)->filename);
-	if((dirlength+filelength+1) > MAXPATHLEN)
-		return -1;
-
-	if(dirlength == 0)
-		sprintf(currentPath, "%s", PathStructure.at(SelIndex)->filename);
-	else
-		sprintf(currentPath, "%s/%s", currentPath, PathStructure.at(SelIndex)->filename);
-
-	return ParseArchiveDirectory(currentPath);
+    if(SelIndex<0 || (unsigned)SelIndex>=PathStructure.size()) return -1;
+    std::string path=currentPath;
+    if(!path.empty()) path+='/';
+    path+=PathStructure[SelIndex]->filename;
+    if(path.size()>=sizeof(currentPath) || !wx_archive_member(path.c_str())) return -1;
+    memcpy(currentPath,path.c_str(),path.size()+1);
+    return ParseArchiveDirectory(currentPath);
 }
 
 int ArchiveBrowser::LeaveCurDir()
@@ -320,9 +287,10 @@ const char * ArchiveBrowser::GetCurrentPath()
 	if(displayPath)
 		delete [] displayPath;
 
-	displayPath = new char[strlen(OrigArchiveFilename)+strlen(currentPath)+2];
-
-	sprintf(displayPath, "%s/%s", OrigArchiveFilename, currentPath);
+	std::string path=std::string(OrigArchiveFilename)+"/"+currentPath;
+    displayPath=new(std::nothrow) char[path.size()+1];
+    if(!displayPath) return "";
+    memcpy(displayPath,path.c_str(),path.size()+1);
 
 	return displayPath;
 }
@@ -333,18 +301,14 @@ const char * ArchiveBrowser::GetCurrentSelectedFilepath()
 		return currentPath;
 
 	const char *Filename = GetCurrentName();
-	if(!displayPath)
-		return "";
-
-	if(displayPath)
-		delete [] displayPath;
-
-	displayPath = new char[strlen(OrigArchiveFilename)+strlen(currentPath)+strlen(Filename)+3];
-
-	if(strlen(currentPath) == 0 || currentPath[strlen(currentPath)-1] == '/')
-		sprintf(displayPath, "%s/%s%s", OrigArchiveFilename, currentPath, Filename);
-	else
-		sprintf(displayPath, "%s/%s/%s", OrigArchiveFilename, currentPath, Filename);
+    if(!Filename) return "";
+    delete [] displayPath;
+    std::string path=std::string(OrigArchiveFilename)+"/"+currentPath;
+    if(!path.empty() && path.back()!='/') path+='/';
+    path+=Filename;
+    displayPath=new(std::nothrow) char[path.size()+1];
+    if(!displayPath) return "";
+    memcpy(displayPath,path.c_str(),path.size()+1);
 
 	return displayPath;
 }
@@ -412,7 +376,7 @@ int ArchiveBrowser::ParseArchiveDirectory(const char * ArcPath)
 		{
 			AddListEntrie(TmpArchive->filename,  TmpArchive->length,
 						  TmpArchive->comp_length, TmpArchive->isdir,
-						  TmpArchive->fileindex, TmpArchive->ModTime,
+							  i, TmpArchive->ModTime,
 						  TmpArchive->archiveType);
 		}
 	}
@@ -447,7 +411,7 @@ void ArchiveBrowser::SortList()
 	std::sort(PathStructure.begin(), PathStructure.end(), FileSortCallback);
 }
 
-void ArchiveBrowser::AddListEntrie(const char * filename, size_t length, size_t comp_length, bool isdir, u32 index, u64 modtime, u8 Type)
+void ArchiveBrowser::AddListEntrie(const char * filename, u64 length, u64 comp_length, bool isdir, u32 index, u64 modtime, u8 Type)
 {
 	if(!filename)
 		return;
@@ -456,9 +420,9 @@ void ArchiveBrowser::AddListEntrie(const char * filename, size_t length, size_t 
 	TempStruct->filename = new char[strlen(filename)+1];
 	char * realfilename = strrchr(filename, '/');
 	if(realfilename == NULL)
-		snprintf(TempStruct->filename, strlen(filename)+1, "%s", filename);
+		strcpy(TempStruct->filename,filename);
 	else
-		snprintf(TempStruct->filename, strlen(filename)+1, "%s", realfilename+1);
+		strcpy(TempStruct->filename,realfilename+1);
 	TempStruct->length = length;
 	TempStruct->comp_length = comp_length;
 	TempStruct->isdir = isdir;
@@ -479,8 +443,7 @@ ItemStruct * ArchiveBrowser::GetItemStruct(int pos)
 	memset(Item, 0, sizeof(ItemStruct));
 
 	ArchiveFileStruct * CurArchive = archive->GetFileStruct(PathStructure.at(pos)->fileindex);
-	if(!CurArchive)
-		return NULL;
+	if(!CurArchive) { delete Item; return NULL; }
 
 	Item->itempath = strdup(CurArchive->filename);
 	Item->itemsize = CurArchive->length;
@@ -547,4 +510,3 @@ void *ArchiveBrowser::ParseThreadCallback(void *arg)
 
 	return NULL;
 }
-
