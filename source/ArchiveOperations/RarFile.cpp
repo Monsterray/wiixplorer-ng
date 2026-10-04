@@ -53,7 +53,7 @@ RarFile::~RarFile()
 bool RarFile::LoadList()
 {
     ClearList(); ErrHandler.Clean();
-    if(!RarArc.IsOpened() || !RarArc.IsArchive(true)) return false;
+    if(!RarArc.IsOpened() || !RarArc.IsArchive(false)) return false;
     size_t metadata=0; unsigned headers=0;
     while(RarArc.ReadHeader()>0) {
         if(++headers>WX_ARCHIVE_ITEMS*4 || RarArc.BrokenFileHeader) { ClearList(); return false; }
@@ -138,6 +138,11 @@ u32 RarFile::GetItemCount()
 bool RarFile::SeekFile(int index)
 {
     if(!GetFileStruct(index) || !RarArc.RawSeek(0,SEEK_SET)) return false;
+    // ReadHeader expects the signature/main header to have been consumed.
+    // Revalidate them after rewinding, rather than treating the signature as
+    // an ordinary CRC-protected member header.
+    ErrHandler.Clean();
+    if(!RarArc.IsArchive(false)) return false;
     unsigned headers=0,member=0;
     while(RarArc.ReadHeader()>0) {
         if(++headers>WX_ARCHIVE_ITEMS*4 || RarArc.BrokenFileHeader) return false;
@@ -239,10 +244,12 @@ int RarFile::InternalExtractFile(int index,const char *root,bool withpath)
     else {
         std::unique_ptr<byte[]> window(new(std::nothrow) byte[MAXWINSIZE]);
         if(!window) return -1;
-        Unpack unpack(&data); unpack.Init(window.get());
+        std::unique_ptr<Unpack> unpack(new(std::nothrow) Unpack(&data));
+        if(!unpack) return -1;
+        unpack->Init(window.get());
         if(ErrHandler.GetErrorCode()!=0) return -1;
-        unpack.SetDestSize(RarArc.NewLhd.FullUnpSize);
-        unpack.DoUnpack(RarArc.NewLhd.UnpVer<=15 ? 15 : RarArc.NewLhd.UnpVer,false);
+        unpack->SetDestSize(RarArc.NewLhd.FullUnpSize);
+        unpack->DoUnpack(RarArc.NewLhd.UnpVer<=15 ? 15 : RarArc.NewLhd.UnpVer,false);
     }
     } catch(const std::bad_alloc &) { return -1; }
     if(wx_archive_cancelled()) return PROGRESS_CANCELED;

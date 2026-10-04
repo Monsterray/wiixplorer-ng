@@ -105,7 +105,7 @@ static bool MemoryRow(FILE *out,const char *operation,const char *src,const char
                       unsigned block,unsigned repeat,u64 ticks,bool verified)
 {
     return fprintf(out,"%s,%s,%s,%u,%u,%u,%llu,%u\n",operation,src,dst,block,repeat,
-                   MemoryBytes,ticks_to_microsecs(ticks),verified)>0 && verified && ticks;
+                   MemoryBytes,ticks_to_microsecs(ticks),verified)>0 && fflush(out)==0 && verified && ticks;
 }
 
 static u32 MemoryInfo(unsigned address)
@@ -115,6 +115,14 @@ static u32 MemoryInfo(unsigned address)
 #else
     (void)address;return 0;
 #endif
+}
+
+static u32 MemoryArenaBytes(u32 low,u32 high,u32 base,u32 physical)
+{
+    // IOS can leave MEM1's arena start unset. Such fields are not a usable
+    // address range; never report a cached address as gigabytes of capacity.
+    if(low<base || high<low || (u64)high>(u64)base+physical) return 0;
+    return high-low;
 }
 
 void RunMemoryBenchmark(const char *directory)
@@ -140,9 +148,9 @@ void RunMemoryBenchmark(const char *directory)
         fprintf(meta,"bank,physical_bytes,ios_simulated_bytes,ios_arena_bytes,unallocated_arena_bytes,allocator_free_before,benchmark_allocated_bytes,source_address,destination_address\n");
         u32 lo1=MemoryInfo(0x8000310c),hi1=MemoryInfo(0x80003110);
         u32 lo2=MemoryInfo(0x80003124),hi2=MemoryInfo(0x80003128);
-        fprintf(meta,"MEM1,%u,%u,%u,%u,%u,%u,%08x,%08x\n",MemoryInfo(0x80003100),MemoryInfo(0x80003104),hi1>=lo1 ? hi1-lo1 : 0,
+        fprintf(meta,"MEM1,%u,%u,%u,%u,%u,%u,%08x,%08x\n",MemoryInfo(0x80003100),MemoryInfo(0x80003104),MemoryArenaBytes(lo1,hi1,0x80000000,MemoryInfo(0x80003100)),
                 arena1,mem1Free,2*MemoryBlock,(u32)(size_t)buffers[0],(u32)(size_t)buffers[1]);
-        fprintf(meta,"MEM2,%u,%u,%u,%u,%u,%u,%08x,%08x\n",MemoryInfo(0x80003118),MemoryInfo(0x8000311c),hi2>=lo2 ? hi2-lo2 : 0,
+        fprintf(meta,"MEM2,%u,%u,%u,%u,%u,%u,%08x,%08x\n",MemoryInfo(0x80003118),MemoryInfo(0x8000311c),MemoryArenaBytes(lo2,hi2,0x90000000,MemoryInfo(0x80003118)),
                 arena2,mem2Free,2*MemoryBlock,(u32)(size_t)buffers[2],(u32)(size_t)buffers[3]);
         fprintf(meta,"LC,16384,0,0,0,0,8192,e0000000,00000000\n");
         if(fclose(meta)!=0) okay=false;
@@ -152,6 +160,8 @@ void RunMemoryBenchmark(const char *directory)
     const char *names[]={"MEM1","MEM2"};
     u32 seed=42,reference[2]={0,0};
     if(out) {
+        if(fprintf(out,"operation,source,destination,block_bytes,repeat,bytes,ticks_us,verified\n")<=0 || fflush(out)!=0) okay=false;
+        // Keep partial measurements available after a native timeout.
         for(unsigned i=0;i<MemoryBlock;++i) {
             seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;
             buffers[0][i]=seed;
@@ -161,7 +171,6 @@ void RunMemoryBenchmark(const char *directory)
         for(unsigned region=0;region<2;++region)
             for(unsigned n=0;n<MemoryBytes/MemoryBlock;++n)
                 reference[region]=crc32(reference[region],buffers[region*2],MemoryBlock);
-        fprintf(out,"operation,source,destination,block_bytes,repeat,bytes,ticks_us,verified\n");
         void *(*volatile copy)(void*,const void*,size_t)=memcpy;
         printf("Memory benchmark: allocated, starting memcpy/CRC\n");fflush(stdout);
         for(unsigned repeat=0;okay && repeat<3;++repeat) {

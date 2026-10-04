@@ -95,8 +95,100 @@ Run `make check` with a host C/C++ compiler. The archive suites use ASan/UBSan:
 
 The v0.1.1 full host checks, debug build (`PROBE_LEVEL=3`) and release build
 passed locally with devkitPPC r50 / GCC 16.1 and official libogc 3.1.0.
-Real 7z/RAR decoder runtime validation, native 32-bit boundary fixtures, SD/USB
-FAT/NTFS/EXT behavior, cancellation/shutdown under load, low-memory solid blocks,
-and performance measurements remain physical-Wii validation work. The bench Wii
-is unavailable; no native archive result is claimed. Fuzzing the legacy codecs
+The subsequent v0.1.2 native SD fixture run passed as recorded below. Native
+NTFS/EXT behavior, cancellation/shutdown under load, encrypted/split archives,
+and power-loss tests remain validation work. Fuzzing the legacy codecs
 and modernizing their seek APIs are useful next steps.
+
+## Native fixture runner
+
+`make debug PROBE_LEVEL=3` includes `--archive-check=DEVICE:/wiixplorer-archive-NAME`.
+The release build excludes this entry point. `scripts/archive-fixtures.py` uses
+Python's standard library and a host `7z` executable to generate deterministic
+ZIP/7z/stored-RAR/U8/RARC/LZ77/Yaz0 fixtures. Valid cases verify bytes/CRC and
+metadata counts; malformed/traversal/CRC/budget cases must preserve a seeded
+original target. The runner also creates/extracts an exact ZIP tree including
+an empty directory. The hardware controller verifies empty files/directories
+and keeps timing/results under ignored `build/wii.*`.
+
+Queue `python3 scripts/hbc-smoke.py --hardware --archive-device sd --capture-log`
+through the shared lease described in DEBUGGING.md; repeat with `usb1` when a
+USB test partition is mounted. Only isolated fixture directories are written.
+The controller backs up/restores settings and removes its known fixtures; it
+refuses to delete unknown leftovers. Expected decoder error dialogs are
+acknowledged only during this explicit fixture run. No repartitioning or
+formatting is part of these tests. Native short-write/close fault injection and power-loss/concurrent-write tests
+are not covered by this runner; retain the host fault tests and the pending validation list.
+
+`tests/native_archive_bench.py` runs the production native runner with real
+pinned minizip under ASan/UBSan, including CRC failure preserving the original,
+exact packing, manifest guards and completion reporting. It requires `make deps`.
+
+The baseline native run on 2026-10-04 (`build/wii.kmr54g_s`, job
+`20261004-013028-61678c`) passed HOME/settings/diagnostics, the agent file
+roundtrip, level-3 CPU/GPU integrity checks, and clean return to HBC. The
+runner measured 6.977 seconds from requesting exit through its final report
+collection (not pure teardown time) and restored all saved settings. This
+baseline does not establish archive codec correctness or absence of visual
+flashing under every workload.
+
+The optional `tests/archive_seven_codec.py` also links the real pinned SDK
+against the production 7z adapter (ASCII filename platform shim). It validates
+solid members with nonzero offsets, empty entries, invalid indices, corrupt
+packed data preserving originals and aggregate decoder budget rejection.
+ASan/UBSan findings fail the run. A small host-endian SDK patch removes the
+unaligned integer casts found by that test; Wii's bytewise path is unchanged.
+
+Two pinned libarchive compressed-RAR fixtures also cover normal and best
+compression through an independent first member. The best fixture requests a 25 MiB PPM
+dictionary and must fail within the 16 MiB budget while preserving the original. Source notices/hashes and the
+explicit fixture transformation are in
+[tests/fixtures/rar/UPSTREAM.md](tests/fixtures/rar/UPSTREAM.md). Stored RAR is
+locally generated; this extends the runner to real compressed RAR without
+replacing the backend. Encrypted, dependent-solid and split-volume compatibility
+still require separate coverage.
+
+Real RAR codec regression testing also found/fixed signature positioning on
+rewind and rejection of corrupt main headers. The historical decoder cast
+several differently sized Huffman structs through a two-element array view;
+tracked patches now use one bounded base table with genuine derived types.
+This adds a few KiB to decoder state (4,960 bytes on the tested 64-bit host). That state now uses checked heap
+allocation rather than exceeding a typical Wii worker stack. Decoder memory
+and its 4 MiB window are released together at operation completion.
+`tests/archive_rar_codec.py` compiles the pinned decoder plus production adapter
+and error handling under strict ASan/UBSan: stored/normal payloads succeed; bad
+CRC/main header and oversized PPM dictionary preserve existing targets.
+
+## Physical Wii results, 2026-10-04
+
+Job `20261004-023054-307041` passed all **30** SD cases plus normal HOME,
+settings/diagnostics, file roundtrip and return to HBC. Settings/controls/probes
+were restored and owned fixtures removed. Results are retained in ignored
+`build/wii.3szw21i8/archive-results.csv`. This tested the frozen debug DOL
+SHA-256 `d8a98e04edaece3eaa885d5827fa39a7196b687119a819b3e590439273ce8dff`.
+ZIP/7z/RAR, both Wii containers, both compression wrappers, empty directories,
+CRC failures, budget rejection and seeded-original preservation all passed.
+The first run exposed incorrect RARC fixture root/count and cycle-entry
+expectations; those fixtures were corrected, without changing parser behavior.
+
+USB setup failed before app launch: HBC does not expose `usb1:/`, and a later
+request to its `usb:/` service timed out and left HBC unresponsive. USB archive
+validation is therefore **not passed**. Settings restoration is queued as
+`20261004-023553-772e84`. The corrected runner stages all fixture transport on
+SD; an explicit `--archive-output=usb1:/wiixplorer-archive-NAME` makes WiiXplorer
+copy/read/extract/pack on its own USB mount. Native checks validate zero-length
+files and directories, then remove only known fixture files and empty parents.
+Unknown recovery files are retained; HBC never accesses USB for this run.
+Report transport remains on SD. This path also passes the real ZIP host harness.
+
+The latest frozen debug candidate is `build/native-validation-instrumented-0.1.2`,
+DOL SHA-256 `e5d3decbd877ceb4523e5321cf300f94460fe13e10e7e1a86ee42782350f6ab4`.
+USB rerun `20261004-024108-6116ba` awaits HBC recovery. These fixture helpers
+are entirely excluded from release, with no idle archive work. Full `make check`
+(including actual pinned 7z/RAR codecs under strict ASan/UBSan), debug with
+level-3 probes and release builds all passed locally. The host SDK alignment
+patch does not change Wii decoding. No archive buffer or compression defaults
+were changed. The debug fixture manifest is capped at 64 cases; this does not
+change production archive limits. The first failed RARC fixture run retained
+its unexpected generated root entry under `sd:/wiixplorer-archive-wii.vy12t8l5`;
+unknown leftovers were intentionally not recursively deleted.

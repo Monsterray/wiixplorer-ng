@@ -96,3 +96,32 @@ after recovery as job `20261003-151400-d3d394`; its results must be reviewed
 before claiming hardware success. Both debug/release builds and the full host
 check suite passed; the final distinct-pattern change also passed the memory
 sanitizer check. The release ELF has no `RunMemoryBenchmark` symbol.
+
+The queued recovery completed successfully on 2026-10-04. The frozen memory
+retry did not observe the app agent starting and did not finish its speed report.
+Its retained capacity report (`build/wii.06_xbtov/after-memory-capacity.csv`)
+confirms physical MEM1 = 25,165,824 bytes (24 MiB), MEM2 = 67,108,864 bytes
+(64 MiB), and LC = 16,384 bytes (16 KiB). These are capacities, not speed results.
+The MEM1 IOS arena column in that report is implausible and must not be treated
+as a valid available-memory measurement; its boot-info field mapping needs
+further verification. The allocator-free values are application snapshots.
+
+The native report now validates IOS arena fields against the cached address
+range of their physical bank. Unset/reversed/out-of-bank fields report zero
+(unknown/unusable), rather than a cached address being misreported as gigabytes.
+The historical invalid MEM1 arena value above remains untrusted. This changes
+capacity reporting only, not the speed kernels or physical bank sizes.
+
+Job `20261004-022103-7976c6` returned a valid capacity report but timed out
+waiting for benchmark completion. Its retained report is in
+`build/wii.qqd71gf1/after-memory-capacity.csv`; physical capacities match the
+values above. MEM1's unset IOS arena now reports zero; MEM2's valid IOS arena
+reports 56,489,984 bytes. These are not allocator-free totals or bandwidth.
+No memory-speed result is validated. The debug runner now persists its CSV
+header and each completed timing row outside timed regions, so another native
+failure retains the last completed operation. The controller also captures
+failure status/framebuffer before exiting where the agent remains responsive.
+
+After HBC recovery/settings restoration, job `20261004-024106-510554` reruns
+without optional network log forwarding to isolate that variable. Its frozen
+DOL is recorded in ARCHIVES.md. Queuing it is not a passing result.

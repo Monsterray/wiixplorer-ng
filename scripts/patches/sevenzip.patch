@@ -1,0 +1,29 @@
+--- a/source/CpuArch.h
++++ b/source/CpuArch.h
+@@ -5,6 +5,7 @@
+ #define __CPU_ARCH_H
+ 
+ #include "Types.h"
++#include <string.h>
+ 
+ EXTERN_C_BEGIN
+ 
+@@ -62,12 +63,12 @@
+ 
+ #ifdef MY_CPU_LE_UNALIGN
+ 
+-#define GetUi16(p) (*(const UInt16 *)(p))
+-#define GetUi32(p) (*(const UInt32 *)(p))
+-#define GetUi64(p) (*(const UInt64 *)(p))
+-#define SetUi16(p, d) *(UInt16 *)(p) = (d);
+-#define SetUi32(p, d) *(UInt32 *)(p) = (d);
+-#define SetUi64(p, d) *(UInt64 *)(p) = (d);
++static inline UInt16 GetUi16(const void *p) { UInt16 v; memcpy(&v,p,sizeof(v)); return v; }
++static inline UInt32 GetUi32(const void *p) { UInt32 v; memcpy(&v,p,sizeof(v)); return v; }
++static inline UInt64 GetUi64(const void *p) { UInt64 v; memcpy(&v,p,sizeof(v)); return v; }
++static inline void SetUi16(void *p,UInt16 v) { memcpy(p,&v,sizeof(v)); }
++static inline void SetUi32(void *p,UInt32 v) { memcpy(p,&v,sizeof(v)); }
++static inline void SetUi64(void *p,UInt64 v) { memcpy(p,&v,sizeof(v)); }
+ 
+ #else
+ 

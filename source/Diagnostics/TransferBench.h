@@ -3,5 +3,6 @@
 #if WX_DEBUG_BUILD
 void RunCopyBenchmark(const char *directory);
 void RunStorageBenchmark(const char *directory, const char *reportDirectory = NULL);
+void RunArchiveValidation(const char *directory, const char *usbRoot = NULL);
 void RunMemoryBenchmark(const char *directory);
 #endif

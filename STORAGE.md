@@ -17,13 +17,29 @@ of three **8 MiB** operations. No CRC errors occurred.
 | USB1, first run | 7.582 MiB/s | 3.102 MiB/s | 1.959 MiB/s | 1.757 MiB/s |
 | USB1, interleaved repeat | 7.518 MiB/s | 3.124 MiB/s | 1.950 MiB/s | 1.761 MiB/s |
 
+A repeat on **2026-10-04**, with the same three-by-8 MiB verified workload,
+produced:
+
+| Mounted drive | Read, 256 KiB | Write, 256 KiB | Copy, 128 KiB | Copy, 256 KiB |
+| --- | ---: | ---: | ---: | ---: |
+| SD | 6.726 MiB/s | 3.871 MiB/s | 2.091 MiB/s | 2.103 MiB/s |
+| USB1 | 7.540 MiB/s | 3.151 MiB/s | 1.580 MiB/s | 1.737 MiB/s |
+
+Jobs `20261004-014024-8daaec` and `20261004-014024-8949de` passed and returned
+to HBC, restored settings and removed their fixtures. CSVs/metadata are retained
+in ignored `build/wii.9rgp3x8_` and `build/wii.b10ans9v`. FAT32/32 KiB clusters,
+512-byte sectors and partition starts were unchanged. The reversed USB copy
+ranking shows that the earlier 128 KiB advantage is not consistent across runs;
+no further buffer/default or partitioning change follows from this repeat.
+A larger sustained, interleaved comparison is needed before revising the default.
+
 The interleaved USB repeat starts at 256 KiB and reverses order each round.
 128 KiB improved median copy payload throughput by **10.8%** in that repeat
 (and 11.5% in the first USB run). SD's 128 KiB result was 1.8% faster in this
 sample. The default `CopyFile()` buffer is now **128 KiB**, retaining explicit
 16-byte through 256 KiB requests and smaller allocation fallbacks. This saves
-128 KiB per ordinary copy versus the prior default. These measurements support
-that choice for the attached drives; they do not establish the best buffer for
+128 KiB per ordinary copy versus the prior default. The initial measurements supported
+that choice for the attached drives; the repeat above limits that conclusion; they do not establish the best buffer for
 every drive or cross-device/network workload.
 
 | Mounted drive | Filesystem | Cluster | Logical sector | Partition start | Partition size | Initial free space |

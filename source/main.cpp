@@ -63,10 +63,15 @@ static u32 SmokeFrames(int argc, char **argv)
 int main(int argc UNUSED, char *argv[] UNUSED)
 {
 #if WX_DEBUG_BUILD
-    char memoryDirectory[768]={};
-    for(int i=1;i<argc;++i)
+    char memoryDirectory[768]={},archiveDirectory[768]={},archiveOutput[768]={};
+    for(int i=1;i<argc;++i) {
+        if(!strncmp(argv[i],"--archive-output=",17) && strlen(argv[i]+17)<sizeof(archiveOutput))
+            memcpy(archiveOutput,argv[i]+17,strlen(argv[i]+17)+1);
+        if(!strncmp(argv[i],"--archive-check=",16) && strlen(argv[i]+16)<sizeof(archiveDirectory))
+            memcpy(archiveDirectory,argv[i]+16,strlen(argv[i]+16)+1);
         if(!strncmp(argv[i],"--memory-bench=",15) && strlen(argv[i]+15)<sizeof(memoryDirectory))
             memcpy(memoryDirectory,argv[i]+15,strlen(argv[i]+15)+1);
+    }
 #endif
 	HbcAgentPrepare();
 	__exception_setreload(30);
@@ -77,6 +82,7 @@ int main(int argc UNUSED, char *argv[] UNUSED)
 	Application::Instance()->show();
 #if WX_DEBUG_BUILD
     if(memoryDirectory[0]) RunMemoryBenchmark(memoryDirectory);
+    if(archiveDirectory[0]) RunArchiveValidation(archiveDirectory,archiveOutput[0] ? archiveOutput : NULL);
 	Application::Instance()->SetSmokeFrames(SmokeFrames(argc, argv));
 	for (int i=1; i<argc; ++i)
 		if (!strncmp(argv[i], "--copy-bench=", 13)) RunCopyBenchmark(argv[i]+13);

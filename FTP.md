@@ -93,3 +93,13 @@ zero failures. The extra queued restoration job also completed successfully.
 Repeated native UI enable/disable cycling and sustained multi-client load remain
 follow-up tests; the lifecycle cycles were exercised with the real implementation
 in the host harness.
+
+On 2026-10-04, retries `20261004-014024-816734` (port 21) and
+`20261004-023019-9b99a0` (port 2121) timed out establishing TCP connections.
+The diagnostics overlay showed network ready and an initialized FTP worker
+cycling, so this is an unresolved regression/environmental failure rather than
+missing AutoStart. The earlier native acceptance above remains historical;
+these retries do not pass. No server/socket behavior was changed on this evidence.
+Job `20261004-024110-0e082d` repeats without optional network log forwarding
+once HBC recovers. A timeout cannot distinguish IOS listener state from routing
+or filtering; endpoint/packet evidence is still required if it repeats.

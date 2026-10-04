@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import sys
 import tempfile
 import time
 import random
@@ -28,6 +29,7 @@ mode.add_argument('--hardware', action='store_true', help='only inside a wii-ben
 parser.add_argument('--ftp-port', type=int, help='override the FTP fixture port (default Wii 21, Dolphin 2121)')
 parser.add_argument('--ftp-smoke', action='store_true', help='temporary authenticated FTP server roundtrip, append/resume, idle timeout and exit')
 parser.add_argument('--capture-log', action='store_true', help='capture debug stdout through HBC-Reborn on port 4300 when no log target is already set')
+parser.add_argument('--archive-device', choices=['sd','usb1'], help='native production archive fixtures on an isolated test directory')
 parser.add_argument('--memory-bench', action='store_true', help='debug-only native MEM1/MEM2/locked-cache benchmark')
 parser.add_argument('--storage-device', choices=['sd']+['usb'+str(i) for i in range(1,9)], help='debug-only native storage read/write/copy benchmark')
 parser.add_argument('--copy-bench', action='store_true', help='debug-only on-device copy buffer comparison')
@@ -45,8 +47,9 @@ hbc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hbc)
 
 if a.storage_device and not a.hardware: parser.error('Storage timings require physical hardware')
+if a.archive_device and not a.hardware: parser.error('Native archive checks require physical hardware')
 if a.memory_bench and not a.hardware: parser.error('Memory timings require physical hardware')
-if sum(bool(x) for x in (a.memory_bench,a.storage_device,a.copy_bench))>1: parser.error('Choose one benchmark')
+if sum(bool(x) for x in (a.memory_bench,a.storage_device,a.copy_bench,a.archive_device))>1: parser.error('Choose one benchmark')
 
 if a.hardware:
     if not os.environ.get('WII_BENCH_JOB_START') or not os.environ.get('WII_BENCH_IP'):
@@ -92,6 +95,12 @@ ftp_connection = ftp_data = None
 ftp_devices = []
 copy_owned = False
 log_server = None
+archive_directory='sd:/wiixplorer-archive-'+profile.name
+archive_usb_directory='usb1:/wiixplorer-archive-'+profile.name
+# HBC's USB service is avoided; the app copies/validates/cleans its USB fixtures.
+archive_transport_directory=archive_directory
+archive_owned=False
+archive_cleanup=set()
 backups = {}
 created_dirs = []
 try:
@@ -117,7 +126,7 @@ try:
             encoded=bytes(ord(c)^ord('WiiXplorer'[i%10]) for i,c in enumerate(ftp_password)).hex()
             config+=('FTPServer.AutoStart = 1\nFTPServer.User = wiixplorer-test\nFTPServer.IdleTimeout = 30\nFTPServer.Port = '+str(ftp_port)+'\nFTPServer.CPassword = '+encoded+'\n').encode()
         hbc.put_file(address,'sd:/apps/WiiXplorer/WiiXplorer.cfg',config)
-        arguments=['--smoke-frames='+('36000' if a.transfer_bench or a.copy_bench or a.storage_device or a.memory_bench or a.ftp_smoke else '3600')]
+        arguments=['--smoke-frames='+('36000' if a.transfer_bench or a.copy_bench or a.storage_device or a.memory_bench or a.archive_device or a.ftp_smoke else '3600')]
         if a.copy_bench or a.storage_device or a.memory_bench:
             try: hbc.file_request(address,'L',copy_directory+'/')
             except hbc.HBCError as error:
@@ -128,6 +137,24 @@ try:
             elif a.storage_device:
                 arguments+=['--storage-bench='+storage_directory,'--storage-report='+copy_directory]
             else: arguments.append('--copy-bench='+copy_directory)
+        if a.archive_device:
+            import runpy
+            fixture_root=profile/'archive-fixtures'
+            manifest=runpy.run_path(str(ROOT/'scripts/archive-fixtures.py'))['generate'](fixture_root)
+            hbc.file_request(address,'M',archive_transport_directory) # Never reuse an existing root.
+            archive_owned=True
+            for path in sorted(fixture_root.iterdir()):
+                archive_cleanup.add(path.name)
+                hbc.put_file(address,archive_transport_directory+'/'+path.name,path.read_bytes())
+            for row in manifest:
+                name,success,count,member,bytes_,crc=row.split()
+                prefix='out-'+name
+                parts=member.split('/')
+                archive_cleanup.update(prefix+'/'+ '/'.join(parts[:i]) for i in range(1,len(parts)+1))
+                archive_cleanup.add(prefix)
+            archive_cleanup.update(('out-good.zip/zero','out-good.zip/empty','out-good.7z/aaa','out-good.7z/zero','out-good.7z/empty','archive-complete','archive-results.csv','created.zip','packtree/sub/payload','packtree/sub','packtree/empty','packtree','out-pack/packed/sub/payload','out-pack/packed/sub','out-pack/packed/empty','out-pack/packed','out-pack'))
+            arguments.append('--archive-check='+archive_directory)
+            if a.archive_device=='usb1': arguments.append('--archive-output='+archive_usb_directory)
         if a.capture_log:
             if before.get('log'): raise RuntimeError('An existing HBC log target must be preserved; omit --capture-log')
             class SavedLog(hbc.LogServer):
@@ -160,6 +187,28 @@ try:
         hbc.send_keys(address,keys)
         time.sleep(.75)
 
+    if a.archive_device:
+        deadline=time.monotonic()+120
+        while True:
+            try: complete=hbc.get_file(address,archive_directory+'/archive-complete')
+            except hbc.HBCError as error:
+                if error.code != hbc.ENOENT: raise
+            else: break
+            if time.monotonic()>deadline: raise RuntimeError('Native archive checks did not complete')
+            # Expected SDK allocation failures display an OK dialog. Only this
+            # explicit fixture run acknowledges it; ordinary smoke never does.
+            hbc.send_keys(address,'a')
+            time.sleep(1)
+        report=hbc.get_file(address,archive_directory+'/archive-results.csv')
+        (profile/'archive-results.csv').write_bytes(report)
+        rows=list(csv.DictReader(report.decode().splitlines()))
+        if complete!=b'1' or len(rows)!=len(manifest)+1 or any(r['verified']!='1' for r in rows):
+            raise RuntimeError('Native archive integrity/preservation case failed: '+report.decode())
+        for directory in (() if a.archive_device=='usb1' else ('out-good.zip/empty','out-good.7z/empty','out-pack/packed/empty')):
+            hbc.file_request(address,'L',archive_directory+'/'+directory+'/')
+        for filename in (() if a.archive_device=='usb1' else ('out-good.zip/zero','out-good.7z/zero')):
+            if hbc.get_file(address,archive_directory+'/'+filename)!=b'': raise RuntimeError('Empty file differs')
+        print(f'Native {a.archive_device} archives: {len(rows)} real codec/parser, CRC, traversal and preservation cases passed',flush=True)
     if a.memory_bench:
         deadline=time.monotonic()+120
         while True:
@@ -395,6 +444,12 @@ finally:
         if uploaded:
             try: hbc.file_request(address,'D',remote)
             except (OSError,hbc.HBCError): pass
+        if sys.exc_info()[0] is not None:
+            try:
+                (profile/'failure-status.json').write_text(json.dumps(hbc.status(address),indent=2)+'\n')
+                width,height,pixels=hbc.screen(address)
+                (profile/'failure.png').write_bytes(hbc.yuyv_png(width,height,pixels))
+            except (OSError,hbc.HBCError): pass
         hbc.exit_app(address,30)
         hbc.hbc_wait(address,30)
         if log_server: log_server.unregister(address)
@@ -406,6 +461,17 @@ finally:
             for name in ('memory-benchmark.csv','memory-complete','memory-capacity.csv'):
                 try: (profile/('after-'+name)).write_bytes(hbc.get_file(address,copy_directory+'/'+name))
                 except (OSError,hbc.HBCError): pass
+        archive_cleanup_errors=[]
+        if archive_owned:
+            try: (profile/'after-archive-results.csv').write_bytes(hbc.get_file(address,archive_transport_directory+'/archive-results.csv'))
+            except (OSError,hbc.HBCError): pass
+            for relative in sorted(archive_cleanup,key=lambda x:(x.count('/'),x),reverse=True):
+                try: hbc.file_request(address,'D',archive_transport_directory+'/'+relative)
+                except hbc.HBCError as error:
+                    if error.code != hbc.ENOENT: archive_cleanup_errors.append(str(error))
+            try: hbc.file_request(address,'D',archive_transport_directory) # Refuse unknown/nonempty leftovers.
+            except hbc.HBCError as error:
+                if error.code != hbc.ENOENT: archive_cleanup_errors.append(str(error))
         if copy_owned:
             for suffix in ('/source','/destination','/copy-benchmark.csv','/storage-benchmark.csv','/storage-metadata.csv','/storage-complete','/memory-complete','/memory-benchmark.csv','/memory-capacity.csv',''):
                 try: hbc.file_request(address,'D',copy_directory+suffix)
@@ -421,3 +487,5 @@ finally:
         for directory in reversed(created_dirs):
             hbc.file_request(address,'D',directory) # Empty directories only.
         print('Original SD configuration/probe files restored',flush=True)
+        if archive_cleanup_errors:
+            raise RuntimeError('Settings restored; owned archive fixtures have retained leftovers: '+ '; '.join(archive_cleanup_errors))

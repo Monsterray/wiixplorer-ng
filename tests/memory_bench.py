@@ -39,6 +39,11 @@ harness+=source+r'''
 bool exists(const char *p){struct stat s;return stat(p,&s)==0;}
 void complete(const char *p,int value){FILE *f=fopen(p,"rb");assert(f && fgetc(f)==value);fclose(f);assert(!lcEnabled && allocations==0);}
 int main(){
+ assert(MemoryArenaBytes(0,0x81800000,0x80000000,25165824)==0);
+ assert(MemoryArenaBytes(0x80004000,0x81800000,0x80000000,25165824)==25165824-0x4000);
+ assert(MemoryArenaBytes(0x90000800,0x93500000,0x90000000,67108864)==0x3500000-0x800);
+ assert(MemoryArenaBytes(0x90000800,0xffffffff,0x90000000,67108864)==0);
+ assert(MemoryArenaBytes(0x81800000,0x80004000,0x80000000,25165824)==0);
  mkdir("sd:",0700);RunMemoryBenchmark("nand:/unsafe");assert(!exists("nand:/unsafe"));
  mkdir("sd:/owned",0700);RunMemoryBenchmark("sd:/owned");assert(!exists("sd:/owned/memory-complete"));
  RunMemoryBenchmark("sd:/bench");complete("sd:/bench/memory-complete",'1');

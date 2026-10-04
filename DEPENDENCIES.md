@@ -83,7 +83,14 @@ official libogc and DeviceHandler. See [FTP.md](FTP.md).
 The archive block retains the same pinned upstream snapshots. `zip.patch` now
 propagates seek failures and accepts a valid empty ZIP end record at offset zero
 while still verifying its signature. `unrar.patch` bounds PPM dictionary requests
-and handles failed cleanup allocation. `ntfs.patch` and `ext2fs.patch` add
+and handles failed cleanup allocation. It also replaces incompatible two-entry
+Huffman table views with a bounded common base, fixing undefined access found
+by the real compressed-RAR sanitizer fixtures. `ntfs.patch` and `ext2fs.patch` add
 no-follow `lstat_r` callbacks; normal stat/open behavior is unchanged. These
 patches are rebuilt by `make deps` and covered by host regression tests. See
 [ARCHIVES.md](ARCHIVES.md) for adapter limits and pending native validation.
+
+`sevenzip.patch` replaces undefined unaligned integer casts in the x86/little-
+endian path with standard memcpy loads/stores. The existing bytewise Wii
+big-endian path is unchanged. Real pinned SDK fixtures run under ASan/UBSan
+when dependency sources and a host `7z` command are available.
