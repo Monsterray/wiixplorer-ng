@@ -103,3 +103,22 @@ these retries do not pass. No server/socket behavior was changed on this evidenc
 Job `20261004-024110-0e082d` repeats without optional network log forwarding
 once HBC recovers. A timeout cannot distinguish IOS listener state from routing
 or filtering; endpoint/packet evidence is still required if it repeats.
+
+## Dolphin-first follow-up, 0.1.3
+
+`build/dolphin.5lIV8d` passed authenticated SD roundtrip, bad-password rejection,
+empty/APPE/REST, idle/interrupted upload preservation and exit during upload,
+with completed guest/core teardown and valid integrity probes. No plaintext
+password appeared in retained logs. Dolphin had no physical USB device. Native
+retry `20261004-024110-0e082d` was canceled pending emulator validation; the
+recent physical TCP connection failures remain unresolved. No FTP socket or
+server behavior was changed by this validation block.
+
+After Dolphin acceptance and confirmed settings recovery, native job
+`20261004-091506-c92ea4` passed authenticated SD/USB1 LIST/RETR/STOR, empty
+files, append/resume, bad-password rejection, idle preservation and exit during
+upload. Normal UI/file checks and return to HBC 1.9.3 passed; original settings
+and probes were restored. Artifacts are in `build/wii.wlxh9d9z`; its DOL matches
+the accepted Dolphin FTP profile exactly. CPU/GPU integrity rows reported zero
+failures. Earlier TCP failures did not reproduce, but this does not establish
+whether their cause was input/accidental exit or another environmental condition.

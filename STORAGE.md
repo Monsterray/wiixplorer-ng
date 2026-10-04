@@ -187,3 +187,13 @@ No repartitioning or formatting is part of the speed test. A proposed new
 layout needs an identified target, verified backup and explicit approval before
 it is applied. Present possible gains as hypotheses until an A/B measurement
 confirms them.
+
+## Dolphin correctness, 0.1.3
+
+The SD benchmark passed 12 verified read/write/copy rows in
+`build/dolphin.oTZC1d`; the separate staged-copy benchmark passed 15 rows in
+`build/dolphin.c3mW9l`. Both passed HOME/settings/diagnostics, file roundtrip,
+clean guest/core shutdown and frozen-build/integrity/exception checks. These
+are virtual-SD correctness results, not physical drive bandwidth. No buffer,
+filesystem or partitioning defaults were changed based on emulator timings.
+USB and partition comparisons still require a backed-up physical test device.

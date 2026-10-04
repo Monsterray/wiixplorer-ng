@@ -125,3 +125,12 @@ failure status/framebuffer before exiting where the agent remains responsive.
 After HBC recovery/settings restoration, job `20261004-024106-510554` reruns
 without optional network log forwarding to isolate that variable. Its frozen
 DOL is recorded in ARCHIVES.md. Queuing it is not a passing result.
+
+## Dolphin-first follow-up, 0.1.3
+
+All 48 production memory operations verified in the final clean Dolphin
+candidate (`build/dolphin.UQ9HKS`), with normal UI/file/exit and zero reported
+CPU/GPU integrity faults or guest exceptions. Emulator timings are deliberately
+not presented as physical speeds or available Wii memory. Native retry
+`20261004-024106-510554` was canceled pending emulator validation. The native
+completion timeout remains unresolved; physical speeds still need measurement.

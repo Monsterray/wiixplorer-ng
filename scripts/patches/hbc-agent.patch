@@ -373,3 +373,32 @@
 +	if (sendFlags >= 0) net_fcntl(s, F_SETFL, sendFlags);
  	fclose(job.f);
  }
+--- a/sdk/hbc_agent/overlay.c
++++ b/sdk/hbc_agent/overlay.c
+@@ -1315,6 +1315,6 @@
+ static int last_chan = -1;
+ 
+-static unsigned read_input(void) {
++static unsigned read_input(bool ready) {
+ 	static u32 key_wait;
+ 	unsigned out = 0;
+ 	int chan;
+@@ -1321,7 +1321,9 @@
+ 	// Keys from the PC, one every 12 frames so animations can finish.
+ 	if (key_wait)
+ 		key_wait--;
+-	else {
++	// ov_step ignores navigation while opening/closing. Keep queued presses
++	// until it can consume them, rather than dropping a direction before A.
++	else if (ready) {
+ 		switch (agent_key_pop()) {
+ 		case 'u': out = OV_UP; break;
+ 		case 'd': out = OV_DOWN; break;
+@@ -1477,6 +1477,6 @@
+ 		poll(&r);
+ 		ir_update(r.w, r.h);
+-		pressed = read_input();
++		pressed = read_input(ui.open_t == 256 && !ui.closing);
+ 		pointing = ir_read(px, py, pa);
+ 		ov_point(&ui, px, py, pa, pointing, last_chan);
+ 		cal_sample();

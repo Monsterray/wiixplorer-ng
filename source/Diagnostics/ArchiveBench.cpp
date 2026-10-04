@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 static bool ArchiveFixture(const char *path,const char *text)
 {
@@ -52,7 +53,21 @@ static bool ArchiveEraseFixture(const char *root,const char *member)
     char *slash;
     while((slash=strrchr(path,'/')) && (size_t)(slash-path)>length) {
         *slash=0;
-        if(rmdir(path)!=0 && errno!=ENOENT && errno!=ENOTEMPTY && errno!=EEXIST) return false;
+        if(rmdir(path)==0 || errno==ENOENT) continue;
+        if(errno==ENOTEMPTY || errno==EEXIST) break;
+        if(errno!=EACCES) return false;
+        // Current FAT wrappers can report EACCES for a nonempty directory.
+        // Prove it contains an entry; never hide denial on an empty parent.
+        int saved=errno; DIR *dir=opendir(path); if(!dir) return false;
+        bool occupied=false,readFailed=false;
+        for(unsigned i=0;i<3;++i) { // At most '.', '..', and the first child.
+            errno=0; struct dirent *entry=readdir(dir);
+            if(!entry) { readFailed=errno!=0; break; }
+            if(strcmp(entry->d_name,".") && strcmp(entry->d_name,"..")) { occupied=true; break; }
+        }
+        bool closed=closedir(dir)==0;
+        if(!occupied || readFailed || !closed) { errno=saved; return false; }
+        break;
     }
     return true;
 }
@@ -78,7 +93,7 @@ void RunArchiveValidation(const char *root,const char *usbRoot)
        !wx_archive_path(report,sizeof(report),root,"archive-results.csv",true)) return;
     FILE *input=fopen(manifest,"rb"); if(!input) return;
     FILE *out=fopen(report,"wb"); if(!out) { fclose(input); return; }
-    bool okay=fprintf(out,"case,result,count,microseconds,verified\n")>0;
+    bool okay=fprintf(out,"case,result,count,microseconds,verified,detail,error\n")>0;
     char line[1024],name[128],member[128]; unsigned success,count,crc; unsigned long long bytes;
     unsigned cases=0;
     while(okay && fgets(line,sizeof(line),input)) {
@@ -119,7 +134,7 @@ void RunArchiveValidation(const char *root,const char *usbRoot)
             if(!ArchiveEraseFixture(dest,member) || rmdir(dest)!=0) verified=false;
             // The archive object can keep its input open; unlink only after its destructor below.
         }
-        if(fprintf(out,"%s,%d,%u,%llu,%u\n",name,result,actualCount,elapsed,verified)<=0 || fflush(out)!=0) okay=false;
+        if(fprintf(out,"%s,%d,%u,%llu,%u,extraction,0\n",name,result,actualCount,elapsed,verified)<=0 || fflush(out)!=0) okay=false;
         okay=okay && verified;
         printf("Archive native: %s result=%d count=%u verified=%u\n",name,result,actualCount,verified); fflush(stdout);
     }
@@ -135,19 +150,25 @@ void RunArchiveValidation(const char *root,const char *usbRoot)
         if(okay) { ZipFile writer(zip,ZipFile::CREATE); packed=writer.AddDirectory(tree,"packed",6); }
         unsigned count=0;
         if(okay && packed>0) { ZipFile reader(zip); count=reader.GetItemCount(); packed=reader.ExtractAll(dest); }
+        const char *detail="payload"; int cleanupError=0;
         okay=okay && packed>0 && count==4 && wx_archive_path(file,sizeof(file),dest,"packed/sub/payload",true) &&
              ArchiveVerify(file,8,crc32(0,(const Bytef*)"original",8));
-        okay=okay && ArchiveEmptyDirectory(dest,"packed/empty");
+        if(okay) { detail="empty-directory"; okay=ArchiveEmptyDirectory(dest,"packed/empty"); }
         if(usbRoot && okay) {
             const char *known[]={"packtree/sub/payload","packtree/sub","packtree/empty","packtree", "out-pack/packed/sub/payload","out-pack/packed/sub","out-pack/packed/empty","out-pack/packed","out-pack","created.zip"};
-            for(unsigned i=0;i<sizeof(known)/sizeof(*known);++i) if(!ArchiveEraseFixture(work,known[i])) okay=false;
+            for(unsigned i=0;i<sizeof(known)/sizeof(*known) && okay;++i) if(!ArchiveEraseFixture(work,known[i])) {
+                detail=known[i]; cleanupError=errno; okay=false;
+            }
             rewind(input);
             while(okay && fgets(line,sizeof(line),input)) {
-                if(sscanf(line,"%127s",name)!=1 || !ArchiveEraseFixture(work,name)) okay=false;
+                if(sscanf(line,"%127s",name)!=1 || !ArchiveEraseFixture(work,name)) {
+                    detail="cleanup-input"; cleanupError=errno; okay=false;
+                }
             }
-            if(rmdir(work)!=0) okay=false;
+            if(okay && rmdir(work)!=0) { detail="cleanup-root"; cleanupError=errno; okay=false; }
         }
-        if(fprintf(out,"pack,%d,%u,%llu,%u\n",packed,count,ticks_to_microsecs(gettime()-start),okay)<=0) okay=false;
+        if(okay) detail="passed";
+        if(fprintf(out,"pack,%d,%u,%llu,%u,%s,%d\n",packed,count,ticks_to_microsecs(gettime()-start),okay,detail,cleanupError)<=0) okay=false;
     }
     if(ferror(input) || !cases) okay=false;
     if(fclose(input)!=0) okay=false;

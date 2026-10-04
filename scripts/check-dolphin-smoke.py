@@ -4,6 +4,7 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -21,7 +22,9 @@ try:
         if hashlib.sha256((profile/'artifacts'/name).read_bytes()).hexdigest() != digest:
             raise ValueError('Frozen artifact hash mismatch: '+name)
     log = (profile/'Logs/dolphin.log').read_text(errors='replace')
-    if 'WiiXplorer: shutdown cleanup completed' not in log:
+    faults=re.findall(r'^.*(?:\b(?:DSI|ISI|machine check|program|alignment|FPU unavailable) exception\b|exception \((?:DSI|ISI)\)|invalid (?:read|write) (?:from|to)|panic alert|stack dump|backtrace:).*$',log,re.IGNORECASE|re.MULTILINE)
+    if faults: raise ValueError('Guest exception/error recorded: '+faults[0].strip())
+    if 'WiiXplorer: shutdown cleanup completed'  not in log:
         raise ValueError('Guest did not report completed teardown')
     if 'Shutdown complete ----' not in log:
         raise ValueError('Dolphin did not report completed core shutdown')
@@ -38,9 +41,13 @@ try:
             if row['group'] in ('cpu','gpu') and row['level']=='3' and int(row['value']):
                 raise ValueError('CPU/GPU integrity probe failed')
         smoke = profile/'Load/WiiSDSync/apps/WiiXplorer/smoke-frames.txt'
-        if smoke.exists() and 'cpu' in info['probe_groups']:
+        if 'cpu' in info['probe_groups']:
             updates = sum(int(r['count']) for r in rows if r['group']=='cpu' and r['level']=='1')
-            if updates < int(smoke.read_text()): raise ValueError('Insufficient GUI updates')
+            if updates<=0: raise ValueError('No GUI updates')
+            remote=profile/'hbc-smoke.json'
+            intentional_exit=remote.exists() and json.loads(remote.read_text()).get('passed') is True
+            if smoke.exists() and not intentional_exit and updates<int(smoke.read_text()):
+                raise ValueError('Insufficient GUI updates')
 except (OSError, ValueError, KeyError) as error:
     sys.exit(str(error))
 print('Smoke passed: frozen build verified, guest/core teardown completed, probe output valid')

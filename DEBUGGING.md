@@ -454,3 +454,80 @@ caught a DSI while the old shutdown fade drew freed GUI children. Shutdown now
 keeps the completed frame until GX is drained instead of drawing during owner
 destruction. A frozen profile's DOL can be checked against its ELF with
 `elf2dol boot.elf check.dol` and a byte comparison before trusting addresses.
+
+## Dolphin-first validation (0.1.3, 2026-10-04)
+
+Run the candidate in Dolphin before scheduling physical-Wii tests. The launcher
+freezes its DOL/ELF/map and hashes under an ignored disposable profile. Normal
+runs use batch mode so the owned window closes after core shutdown; `--debug`
+keeps the interactive debugger. PowerPC/JIT and OSReport logs are retained.
+Raw network payload logging stays disabled because it can expose PASS.
+
+```sh
+bash scripts/dolphin.sh --build debug --bench archive --smoke-frames 36000
+python3 scripts/hbc-smoke.py --profile build/dolphin.PROFILE --archive-device sd
+python3 scripts/check-dolphin-smoke.py build/dolphin.PROFILE
+```
+
+Replace `archive` with `memory`, `storage` or `copy`, and use `--memory-bench`,
+`--storage-device sd` or `--copy-bench` on the controller. The launcher stages
+a bounded debug-only `apps/WiiXplorer/bench.cfg`; release never reads it. Parsing
+rejects unknown, duplicate, truncated, control-character and overlong arguments
+atomically. No benchmark runs without explicit options. Emulator runs verify
+operations, not physical bandwidth or USB hardware.
+
+The checker rejects recorded guest exceptions/invalid accesses/panic/backtraces,
+requires application and core teardown, verifies frozen hashes and CPU/GPU
+integrity probes, and requires GUI activity. An intentional early remote exit
+requires a passing controller report; a safety timer alone is not acceptance.
+Use the matching frozen ELF to diagnose reported addresses before retrying.
+
+The SDK opening animation discarded queued navigation before the following A
+press, causing unintended Exit selection during the test. The local SDK patch
+retains remote input until fully open and not closing. Host sanitizers exercise
+the actual queue and portable UI, including varied frame delays. The controller
+uses Back from Settings, then navigates to Diagnostics, and checks app identity
+before subsequent operations. Temporary diagnostic probes were removed.
+
+| Dolphin profile | Accepted checks |
+| --- | --- |
+| `build/dolphin.p9VRp8` | 30 production archive cases |
+| `build/dolphin.UQ9HKS` | 48 verified MEM1/MEM2/LC operations |
+| `build/dolphin.5lIV8d` | Authenticated FTP, bad password, empty/APPE/REST, idle/interrupted preservation, exit during upload |
+| `build/dolphin.oTZC1d` | 12 verified SD read/write/copy rows |
+| `build/dolphin.c3mW9l` | 15 verified staged-copy rows |
+
+All five passed Settings/Diagnostics, file roundtrip, guest/core shutdown, frozen
+hash/log/probe checks and zero CPU/GPU integrity failures. Plaintext credentials
+were absent from both FTP logs. Batch windows closed. The shared level-3 DOL
+SHA-256 is `1e7e7619791e581404c3f53f1cc0232fb8cfa82cd91907de959726178d55830c`.
+
+The default level-1 debug run (`build/dolphin.7HCgns`) completed 600 GUI updates
+and guest/core teardown. Its 625 captured frames had zero browser-region
+flashes (maximum frame delta zero). This checks a static macOS/OpenGL browser;
+other backends, transitions and sustained native rendering need their own tests.
+Release boot (`build/dolphin.ShH4h5`) recorded no guest faults and completed
+core shutdown after a bounded host stop; this is not interactive exit acceptance.
+Release symbols exclude debug benchmark/configuration helpers.
+
+`make check`, default debug and release builds passed. New host regressions
+cover guest fault detection, bounded debug configuration, pinned HBC queue/UI
+and FAT fixture cleanup. No archive library, compression default or production
+transfer buffer was changed; idle release work is unchanged.
+
+Native jobs `20261004-024106-510554`, `20261004-024108-6116ba` and
+`20261004-024110-0e082d` were canceled to honor Dolphin-first testing. Recovery
+`20261004-023553-772e84` completed at 08:22, restoring settings, controls and
+probes after the earlier HBC USB hang.
+
+Physical USB testing then exposed debug cleanup treating a nonempty-parent
+EACCES as a packing failure. Host regressions and all 30 Dolphin cases passed
+after the bounded occupancy fix (`build/dolphin.Pu4bol`). Job
+`20261004-091300-812e6b` passed all 30 physical USB cases plus UI/file/exit,
+returned to HBC and restored original settings/probes. See ARCHIVES.md for
+retained earlier artifacts and limits. Physical memory speeds remain unresolved.
+Authenticated FTP retry `20261004-091506-c92ea4` used the identical DOL already
+accepted in Dolphin and passed SD/USB1 transfers, authentication, idle preservation,
+UI/file checks and exit during upload, returning to HBC and restoring settings.
+Artifacts are in `build/wii.wlxh9d9z`. Earlier connection failures did not
+reproduce; their precise cause is not proven by this passing retry.

@@ -94,3 +94,9 @@ patches are rebuilt by `make deps` and covered by host regression tests. See
 endian path with standard memcpy loads/stores. The existing bytewise Wii
 big-endian path is unchanged. Real pinned SDK fixtures run under ASan/UBSan
 when dependency sources and a host `7z` command are available.
+
+The HBC agent local patch also retains queued remote keys while its overlay is
+opening/closing, rather than consuming navigation that the UI ignores during
+animation. Its upstream pin and public API remain unchanged. Host sanitizer
+checks compile the real SDK input queue and portable UI; Dolphin checks both
+app callbacks and exit.

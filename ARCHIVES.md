@@ -192,3 +192,29 @@ were changed. The debug fixture manifest is capped at 64 cases; this does not
 change production archive limits. The first failed RARC fixture run retained
 its unexpected generated root entry under `sd:/wiixplorer-archive-wii.vy12t8l5`;
 unknown leftovers were intentionally not recursively deleted.
+
+## Dolphin-first follow-up, 0.1.3
+
+All 30 production archive cases passed in Dolphin (`build/dolphin.p9VRp8`),
+with Settings/Diagnostics, file roundtrip and completed guest/core shutdown.
+Frozen hashes, exception logs and CPU/GPU integrity checks passed. The original
+USB retry was canceled until these checks completed. Settings recovery
+`20261004-023553-772e84` completed at 08:22.
+
+Physical USB jobs `20261004-090010-c28017` and `20261004-090539-ebee94` passed
+all 29 extraction fixtures. Packing produced four valid entries, correct payload
+CRC and an empty directory, but debug cleanup reported EACCES while pruning a
+nonempty parent. Reports now record the failing phase and cleanup errno. The
+cleaner checks occupancy on EACCES, reading at most three entries (dot, dot-dot,
+first child), then stops pruning. Real denial on an empty directory and read/close
+failures still fail; unknown content remains untouched.
+
+The host regression reproduced the failure before the fix and passed afterward,
+including real empty-parent denial. All 30 cases passed again in Dolphin
+(`build/dolphin.Pu4bol`) before job `20261004-091300-812e6b` passed all 30 on
+physical USB1. It also passed UI/file/exit, returned to HBC and restored original
+settings/probes. Accepted native artifacts are in `build/wii.xv7iohmp`. Earlier
+failed fixture roots and failure artifacts (`build/wii.kkoex1pp`,
+`build/wii.oppwkt0t`) remain retained; no recursive deletion of unknown/recovery
+content was performed. This fix changes only debug fixture cleanup, with no
+production archive or storage-driver changes and no idle release overhead.

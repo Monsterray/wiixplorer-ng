@@ -110,8 +110,11 @@ check:
 	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/regression.py
 	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/stability.py
 	python3 tests/dolphin_process.py
+	python3 tests/dolphin_smoke.py
+	CXX="$(HOST_CXX)" python3 tests/debug_launch.py
 	CXX="$(HOST_CXX)" python3 tests/probes.py
 	CXX="$(HOST_CXX)" python3 tests/hbc_agent.py
+	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/hbc_overlay_keys.py
 	CXX="$(HOST_CXX)" python3 tests/hbc_socket_mode.py
 	python3 tests/hbc_smoke.py
 	CXX="$(HOST_CXX)" python3 tests/storage_bench.py

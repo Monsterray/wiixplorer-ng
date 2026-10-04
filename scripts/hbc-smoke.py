@@ -46,9 +46,9 @@ spec = importlib.util.spec_from_file_location('hbc_client', client)
 hbc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hbc)
 
-if a.storage_device and not a.hardware: parser.error('Storage timings require physical hardware')
-if a.archive_device and not a.hardware: parser.error('Native archive checks require physical hardware')
-if a.memory_bench and not a.hardware: parser.error('Memory timings require physical hardware')
+if a.storage_device and a.storage_device!='sd' and not a.hardware: parser.error('Dolphin does not validate physical USB mounts')
+if a.archive_device=='usb1' and not a.hardware: parser.error('Dolphin does not validate physical USB mounts')
+# Dolphin executes memory operations for correctness; its timings are not hardware speeds.
 if sum(bool(x) for x in (a.memory_bench,a.storage_device,a.copy_bench,a.archive_device))>1: parser.error('Choose one benchmark')
 
 if a.hardware:
@@ -184,10 +184,14 @@ try:
         (profile/name).write_bytes(hbc.yuyv_png(w,h,pixels))
 
     def key(keys):
-        hbc.send_keys(address,keys)
-        time.sleep(.75)
+        # SDK navigation is paced in guest frames. Separate presses so slow
+        # emulation/animations cannot consume A before a preceding direction.
+        for pressed in keys:
+            hbc.send_keys(address,pressed)
+            time.sleep(.75)
 
     if a.archive_device:
+        if not a.hardware: manifest=(profile/'Load/WiiSDSync'/archive_directory[4:]/'manifest').read_text().splitlines()
         deadline=time.monotonic()+120
         while True:
             try: complete=hbc.get_file(address,archive_directory+'/archive-complete')
@@ -226,14 +230,15 @@ try:
         (profile/'memory-benchmark.csv').write_bytes(report)
         capacity=hbc.get_file(address,copy_directory+'/memory-capacity.csv')
         (profile/'memory-capacity.csv').write_bytes(capacity)
-        print(capacity.decode().strip(),flush=True)
+        if a.hardware: print(capacity.decode().strip(),flush=True)
         hbc.file_request(address,'D',copy_directory+'/memory-capacity.csv')
         groups={}
         for row in rows:
             group_key=(row['operation'],row['source'],row['destination'])
             groups.setdefault(group_key,[]).append(int(row['bytes'])/1048576/(int(row['ticks_us'])/1000000))
-        for (operation,src,dst),speeds in groups.items():
+        for (operation,src,dst),speeds in (groups.items() if a.hardware else ()):
             print(f'{operation} {src}->{dst}: median {statistics.median(speeds):.3f} MiB/s ({len(speeds)} verified runs)',flush=True)
+        if not a.hardware: print('Dolphin memory correctness: 48 verified operations; emulator timings are not Wii bandwidth',flush=True)
         hbc.file_request(address,'D',copy_directory+'/memory-complete')
         hbc.file_request(address,'D',copy_directory+'/memory-benchmark.csv')
         hbc.file_request(address,'D',copy_directory)
@@ -262,20 +267,21 @@ try:
             (profile/'storage-metadata.csv').write_bytes(metadata)
             hbc.file_request(address,'D',copy_directory+'/storage-metadata.csv')
             hbc.file_request(address,'D',copy_directory+'/storage-complete')
-            print(metadata.decode().strip(),flush=True)
+            if a.hardware: print(metadata.decode().strip(),flush=True)
         hbc.file_request(address,'D',copy_directory)
         groups={}
         for row in rows:
             group=(row.get('operation','copy'),int(row['buffer_bytes']))
             groups.setdefault(group,[]).append(int(row['bytes'])/1048576/(int(row['microseconds'])/1000000))
-        for (operation,buffer),speeds in groups.items():
+        if not a.hardware: print('Dolphin SD transfer correctness verified; emulator timings are not drive speeds',flush=True)
+        for (operation,buffer),speeds in (groups.items() if a.hardware else ()):
             print(f'{a.storage_device or "sd"} {operation} {buffer//1024} KiB: median {statistics.median(speeds):.3f} MiB/s ({len(speeds)} verified runs)',flush=True)
 
     time.sleep(1) # Let the startup fade finish.
     shot('browser.png')
     key('h'); shot('home.png')
     key('la'); shot('settings.png'); key('a'); shot('settings-saved.png')
-    key('h'); key('h'); key('ra'); shot('diagnostics.png')
+    key('b'); key('rra'); shot('diagnostics.png') # Back to Settings, then two tabs right.
     key('a'); shot('probes-flushed.png')
     key('h'); shot('browser-restored.png')
     data = b'WiiXplorer HBC-Reborn roundtrip\n'*100
@@ -354,6 +360,7 @@ try:
             'failure_checks':['crc','short','idle','oversize','stalled-download'],
             'stalled_download_seconds':stalled_download_seconds,'passed':True},indent=2))
         print('Transfer benchmark median MiB/s:',json.dumps(medians),flush=True)
+    if hbc.status(address).get('app')!='WiiXplorer NG': raise RuntimeError('Controller unexpectedly left WiiXplorer before FTP checks')
     if a.ftp_smoke:
         ftp_connection=ftplib.FTP(timeout=15)
         ftp_connection.connect(address,ftp_port)
@@ -407,6 +414,7 @@ try:
         print('FTP roundtrip, empty, append/resume and idle preservation passed',flush=True)
     else:
         hbc.file_request(address,'D',remote); uploaded = False
+    if hbc.status(address).get('app')!='WiiXplorer NG': raise RuntimeError('Controller unexpectedly left WiiXplorer before transfer checks')
     # Fetch while mounted. The subsequent clean exit proves the final flush separately.
     probes = hbc.get_file(address,'sd:/apps/WiiXplorer/probes.csv')
     (profile/'probes.csv').write_bytes(probes)
@@ -439,6 +447,15 @@ finally:
     if log_server: log_server.close()
     if ftp_data: ftp_data.close()
     if ftp_connection: ftp_connection.close()
+    if not a.hardware and sys.exc_info()[0] is not None:
+        try:
+            status=hbc.status(address)
+            (profile/'failure-status.json').write_text(json.dumps(status,indent=2)+'\n')
+            if status.get('app')=='WiiXplorer NG':
+                width,height,pixels=hbc.screen(address)
+                (profile/'failure.png').write_bytes(hbc.yuyv_png(width,height,pixels))
+                hbc.request(address,b'HBCX')
+        except (OSError,hbc.HBCError): pass
     if a.hardware:
         # The official client refuses to exit an app that predates this lease.
         if uploaded:

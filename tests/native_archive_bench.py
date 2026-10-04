@@ -25,8 +25,25 @@ with tempfile.TemporaryDirectory(prefix='wx-native-archive-') as tmp:
 u64 gettime(){return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
 u64 ticks_to_microsecs(u64 t){return t/1000;}
 class ArchiveHandle {ZipFile z;public:ArchiveHandle(const char*p):z(p){}ArchiveFileStruct *GetFileStruct(int i){return z.GetFileStruct(i);}unsigned GetItemCount(){return z.GetItemCount();}int ExtractAll(const char*p){return z.ExtractAll(p);}};
+static const char *DeniedDirectory=NULL;
+int FixtureRmdir(const char *path){
+ if(DeniedDirectory && !strcmp(path,DeniedDirectory)){errno=EACCES;return -1;}
+ int result=rmdir(path);
+ if(result && errno==ENOTEMPTY && getenv("FAT_RMDIR_DENIED")) errno=EACCES;
+ return result;
+}
+#define rmdir FixtureRmdir
 '''+f.stripped('source/Diagnostics/ArchiveBench.cpp')+r'''
-int main(){RunArchiveValidation(NULL,NULL);RunArchiveValidation("nand:/wiixplorer-archive-host",NULL);RunArchiveValidation("sd:/ordinary",NULL);RunArchiveValidation("sd:/wiixplorer-archive-host",getenv("USB_ROOT"));return 0;}
+#undef rmdir
+int main(){
+ RunArchiveValidation(NULL,NULL);RunArchiveValidation("nand:/wiixplorer-archive-host",NULL);RunArchiveValidation("sd:/ordinary",NULL);
+ RunArchiveValidation("sd:/wiixplorer-archive-host",getenv("USB_ROOT"));
+ assert(mkdir("sd:/denied",0700)==0);assert(mkdir("sd:/denied/child",0700)==0);
+ assert(ArchiveFixture("sd:/denied/child/payload","fixture"));DeniedDirectory="sd:/denied/child";
+ assert(!ArchiveEraseFixture("sd:/denied","child/payload"));
+ DeniedDirectory=NULL;assert(rmdir("sd:/denied/child")==0);assert(rmdir("sd:/denied")==0);
+ return 0;
+}
 '''
     (p/'test.cpp').write_text(code);objects=[]
     for name in ('ioapi','unzip','zip'):
@@ -43,11 +60,11 @@ int main(){RunArchiveValidation(NULL,NULL);RunArchiveValidation("nand:/wiixplore
         assert sorted(z.namelist())==['packed/','packed/empty/','packed/sub/','packed/sub/payload']
     # Exercise the actual USB staging/cleanup path with a host devoptab directory.
     (p/'usb1:').mkdir()
-    subprocess.run([str(p/'test')],cwd=p,env=dict(os.environ,USB_ROOT='usb1:/wiixplorer-archive-host'),check=True,timeout=30)
+    subprocess.run([str(p/'test')],cwd=p,env=dict(os.environ,USB_ROOT='usb1:/wiixplorer-archive-host',FAT_RMDIR_DENIED='1'),check=True,timeout=30)
     assert (root/'archive-complete').read_bytes()==b'1'
     assert not (p/'usb1:/wiixplorer-archive-host').exists()
     # Malformed manifest must fail without publication or a success marker.
     (root/'manifest').write_text('../escape 1 1 payload 1 0\n')
     subprocess.run([str(p/'test')],cwd=p,check=True,timeout=30)
     assert (root/'archive-complete').read_bytes()==b'0'
-print('Native archive runner: real ZIP extraction, failed CRC preservation, exact packing, report completion and manifest guards passed')
+print('Native archive runner: real ZIP extraction, failed CRC preservation, exact packing, report completion, manifest guards and FAT nonempty/real permission cleanup errors passed')
