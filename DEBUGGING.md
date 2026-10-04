@@ -493,7 +493,7 @@ before subsequent operations. Temporary diagnostic probes were removed.
 | --- | --- |
 | `build/dolphin.p9VRp8` | 30 production archive cases |
 | `build/dolphin.UQ9HKS` | 48 verified MEM1/MEM2/LC operations |
-| `build/dolphin.5lIV8d` | Authenticated FTP, bad password, empty/APPE/REST, idle/interrupted preservation, exit during upload |
+| `build/dolphin.5lIV8d` | Authenticated FTP, empty/APPE/REST, idle/interrupted preservation, exit during upload |
 | `build/dolphin.oTZC1d` | 12 verified SD read/write/copy rows |
 | `build/dolphin.c3mW9l` | 15 verified staged-copy rows |
 
@@ -531,3 +531,28 @@ accepted in Dolphin and passed SD/USB1 transfers, authentication, idle preservat
 UI/file checks and exit during upload, returning to HBC and restoring settings.
 Artifacts are in `build/wii.wlxh9d9z`. Earlier connection failures did not
 reproduce; their precise cause is not proven by this passing retry.
+
+## Follow-up validation, 0.1.4
+
+All hardware access, including recovery and diagnostic-file cleanup, uses the
+shared Wii queue server. The local dispatcher is not a substitute for its lease.
+Native memory job `20261004-105910-ed3057` passed 48 verified operations plus
+UI/file/exit and settings restoration, after its identical DOL passed Dolphin
+(`build/dolphin.8yAVUk`). Preserving the full DMAL cache tag address fixed the
+first-DMA machine check. CSV rows are now synced outside timing, so failures
+retain the last completed operation. See MEMORY.md for capacities and medians.
+
+Fresh native SD and USB1 storage checks passed after Dolphin acceptance; both
+are already aligned FAT32 with 32 KiB clusters. No repartitioning or production
+buffer tuning was performed (STORAGE.md). FTP runtime tests now require a real
+530 bad-password rejection and record passive endpoints without credentials.
+Recent native control/data connection failures remain open (FTP.md).
+
+Final clean v0.1.4 debug runs passed memory48 and FTP bad-password rejection,
+full SD transfers, UI/file/exit, frozen hashes, probes and exception/teardown
+checks (`build/dolphin.aCcoTN`, `build/dolphin.HeqKA7`). Default debug/release
+builds and `make check` passed. Release ELF contains no memory benchmark or
+temporary FTP trace symbols. The bounded release boot (`build/dolphin.Y54STO`)
+recorded no guest fault markers and shut down the core after a host stop; this
+is not interactive release exit acceptance. Temporary probes were removed;
+production archive/backend/buffer defaults and idle release work are unchanged.

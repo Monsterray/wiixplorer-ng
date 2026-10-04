@@ -197,3 +197,26 @@ clean guest/core shutdown and frozen-build/integrity/exception checks. These
 are virtual-SD correctness results, not physical drive bandwidth. No buffer,
 filesystem or partitioning defaults were changed based on emulator timings.
 USB and partition comparisons still require a backed-up physical test device.
+
+## Dolphin-first native repeat, 2026-10-04
+
+After verified Dolphin storage operations, leased jobs
+`20261004-101211-ad1494` (SD) and `20261004-101215-6cf0d9` (USB1) passed all
+12 production rows, UI/file checks and return to HBC, and restored original
+settings/probes. Frozen DOL matches `build/dolphin.oTZC1d/artifacts`. Results
+are medians of three verified 8 MiB operations on IOS58, level-3 debug:
+
+| Drive | Read 256 KiB | Write 256 KiB | Copy 128 KiB | Copy 256 KiB |
+| --- | ---: | ---: | ---: | ---: |
+| SD | 7.128 MiB/s | 4.199 MiB/s | 2.057 MiB/s | 2.121 MiB/s |
+| USB1 | 7.554 MiB/s | 2.520 MiB/s | 1.962 MiB/s | 1.753 MiB/s |
+
+Artifacts are `build/wii.1xflgn3b` and `build/wii.xo4osyzp`. FAT32, 512-byte
+sectors, 32 KiB clusters and partition starts remain unchanged: SD LBA 8192
+(4 MiB), USB1 LBA 2048 (1 MiB). Both already have aligned partitions; no
+repartitioning/formatting was performed. USB's write median changed from prior
+runs while read stayed similar. This run alone cannot identify media/cache/IOS
+causes or establish sustained speed. Retain the bounded 128 KiB copy default;
+its USB advantage and smaller allocation remain useful, while SD rankings vary.
+Next comparisons should interleave repeated buffer/cache tests and include many
+small files, using a spare backed-up drive for any cluster/filesystem changes.

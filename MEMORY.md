@@ -1,10 +1,10 @@
 # Native memory measurements
 
-The physical Wii benchmark is **pending**. On 2026-10-03, one attempt failed
-to start the application, another started but produced no completion marker,
-and a third timed out uploading the DOL. The Wii then stopped responding;
-the operator cannot currently reboot it. These attempts provide no valid
-memory speed measurements or console-specific capacity report.
+The physical Wii benchmark passed all 48 verified operations on 2026-10-04,
+followed by normal UI/file checks, exit to HBC and restoration of original
+settings. Every hardware operation used the shared Wii queue-server lease,
+and the exact DOL first passed the same checks in Dolphin. See the measured
+results below; emulator timings are not used as physical bandwidth.
 
 ## Capacity
 
@@ -25,8 +25,8 @@ simulated MEM1/MEM2 sizes and arena limits, using the offsets documented in
 It separately records remaining SYS arena space and allocator free bytes before
 the benchmark. These are different from physical capacity: IOS, application
 code, resources and allocator reservations reduce usable memory. LC capacity
-is architectural; it is not dynamically detected. No live capacity report has
-yet been retrieved from this application.
+is architectural; it is not dynamically detected. Native reports confirmed the
+MEM1/MEM2 capacities above.
 
 ## Benchmark and interpretation
 
@@ -83,9 +83,11 @@ and restores settings. `--build-dir` selects a frozen candidate instead of the
 current debug build. Other contributors can use the application argument on
 their own Wii and retrieve the two CSV reports from SD.
 
+### Historical failures (superseded by the 0.1.4 results below)
+
 Failed profiles are `build/wii.1s6qxryf`, `build/wii.vpmb_2mu` and
 `build/wii.tb9_2p1w`. The second retained a successful application startup
-without a report. No failure has established a specific LC defect. Argument
+without a report. At that stage no failure had established a specific LC defect. Argument
 capture was moved before application initialization as a precaution, but its
 effect could not be tested because the subsequent upload timed out.
 
@@ -117,7 +119,7 @@ waiting for benchmark completion. Its retained report is in
 `build/wii.qqd71gf1/after-memory-capacity.csv`; physical capacities match the
 values above. MEM1's unset IOS arena now reports zero; MEM2's valid IOS arena
 reports 56,489,984 bytes. These are not allocator-free totals or bandwidth.
-No memory-speed result is validated. The debug runner now persists its CSV
+That retry validated no memory-speed result. The debug runner then persisted its CSV
 header and each completed timing row outside timed regions, so another native
 failure retains the last completed operation. The controller also captures
 failure status/framebuffer before exiting where the agent remains responsive.
@@ -134,3 +136,51 @@ CPU/GPU integrity faults or guest exceptions. Emulator timings are deliberately
 not presented as physical speeds or available Wii memory. Native retry
 `20261004-024106-510554` was canceled pending emulator validation. The native
 completion timeout remains unresolved; physical speeds still need measurement.
+
+## Native results and DMA correction, 0.1.4
+
+Durable CSV checkpoints (`fflush` plus `fsync`, outside timed intervals) retained
+36 verified rows from failed job `20261004-104839-706391`. HBC recorded a machine
+check at PC `8002fd80`, immediately after the first DMA command. The matching ELF
+localized it to `MemoryDma`. Its DMAL word incorrectly stripped the high bits
+of the LC address: `0xe0000000` became zero. LC DMA needs the cache tag address,
+as shown by the installed libogc assembly and
+[libogc2's LCLoadBlocks](https://github.com/extremscorner/libogc2/blob/master/libogc/cache_asm.S).
+The corrected word preserves that address, while the RAM word retains MEM2's
+physical bit 28. A production command-word host regression failed before this
+fix and passed afterward. Report sync failure now stops before enabling LC.
+
+The corrected DOL passed all 48 operations and UI/file/exit checks in Dolphin
+(`build/dolphin.8yAVUk`), then native job `20261004-105910-ed3057` passed the same
+sequence, returned to HBC 1.9.3 and restored settings. Native artifacts are
+`build/wii.bff59o32`. This resolves the DMA machine check for this benchmark;
+no release memory kernel or shared SDK was changed.
+
+Each value below is the median of three verified runs, processing 8 MiB per run:
+
+| Operation | Source → destination | MiB/s |
+| --- | --- | ---: |
+| memcpy, destination flush timed | MEM1 → MEM1 | 201.496 |
+| memcpy, destination flush timed | MEM1 → MEM2 | 101.977 |
+| memcpy, destination flush timed | MEM2 → MEM1 | 106.271 |
+| memcpy, destination flush timed | MEM2 → MEM2 | 66.261 |
+| Cached CRC32 | MEM1 → CPU | 218.204 |
+| Cached CRC32 | MEM2 → CPU | 208.133 |
+| Hot 32-bit reads | MEM1 / MEM2 / LC → CPU | 2215.453 / 2215.453 / 2218.525 |
+| Hot 32-bit writes | CPU → MEM1 / MEM2 / LC | 924.749 / 925.069 / 925.605 |
+| Queue-drained DMA load | MEM1 → LC | 1353.409 |
+| Queue-drained DMA store | LC → MEM1 | 1459.854 |
+| Queue-drained DMA load | MEM2 → LC | 440.844 |
+| Queue-drained DMA store | LC → MEM2 | 1462.256 |
+
+The CPU hot loops revisit 8 KiB and measure cache-resident access. DMA timing
+excludes cache maintenance and verification. These workload measurements do
+not establish uncached DRAM bandwidth or an application-wide speedup. No
+production buffer size or allocation policy was changed based on them.
+
+This run reported MEM1 24 MiB and MEM2 64 MiB physical capacity; LC is 16 KiB.
+Allocator free space before the benchmark was 672,904 bytes in MEM1 and
+51,380,064 bytes in MEM2. Unallocated SYS arena space was 13,901,824 and 749,376
+bytes respectively; these are separate pools, not additive available-memory
+promises. The unset MEM1 IOS arena reports zero (unknown); MEM2's IOS arena was
+56,489,984 bytes. Each RAM bank contributed 512 KiB to the benchmark.

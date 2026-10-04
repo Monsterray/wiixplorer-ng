@@ -362,7 +362,24 @@ try:
         print('Transfer benchmark median MiB/s:',json.dumps(medians),flush=True)
     if hbc.status(address).get('app')!='WiiXplorer NG': raise RuntimeError('Controller unexpectedly left WiiXplorer before FTP checks')
     if a.ftp_smoke:
-        ftp_connection=ftplib.FTP(timeout=15)
+        passive_endpoints=[]
+        class SmokeFtp(ftplib.FTP):
+            def makepasv(self):
+                endpoint=super().makepasv()
+                # Record only endpoints; never enable ftplib command tracing/PASS logs.
+                passive_endpoints.append({'host':endpoint[0],'port':endpoint[1],
+                    'control_peer':self.sock.getpeername(),'control_local':self.sock.getsockname()})
+                (profile/'ftp-passive.json').write_text(json.dumps(passive_endpoints,indent=2)+'\n')
+                return endpoint
+        rejected=ftplib.FTP(timeout=15)
+        try:
+            rejected.connect(address,ftp_port)
+            try: rejected.login(ftp_user,ftp_password+'-invalid')
+            except ftplib.error_perm as error:
+                if not str(error).startswith('530'): raise RuntimeError('Unexpected FTP authentication rejection')
+            else: raise RuntimeError('FTP accepted an incorrect password')
+        finally: rejected.close()
+        ftp_connection=SmokeFtp(timeout=15)
         ftp_connection.connect(address,ftp_port)
         ftp_connection.login(ftp_user,ftp_password)
         ftp_devices=ftp_connection.nlst()
@@ -407,11 +424,11 @@ try:
         ftp_data.close();ftp_data=None
         if hbc.get_file(address,remote)!=data: raise RuntimeError('FTP timeout replaced old destination')
         ftp_connection.close()
-        ftp_connection=ftplib.FTP(timeout=15);ftp_connection.connect(address,ftp_port)
+        ftp_connection=SmokeFtp(timeout=15);ftp_connection.connect(address,ftp_port)
         ftp_connection.login(ftp_user,ftp_password)
         ftp_data=ftp_connection.transfercmd('STOR '+ftp_remote)
         ftp_data.sendall(b'exit-during-upload')
-        print('FTP roundtrip, empty, append/resume and idle preservation passed',flush=True)
+        print('FTP bad-password rejection, roundtrip, empty, append/resume and idle preservation passed',flush=True)
     else:
         hbc.file_request(address,'D',remote); uploaded = False
     if hbc.status(address).get('app')!='WiiXplorer NG': raise RuntimeError('Controller unexpectedly left WiiXplorer before transfer checks')

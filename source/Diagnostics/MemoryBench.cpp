@@ -58,12 +58,18 @@ static bool MemoryDrain()
 // Official libogc 3.1.0 clears four upper address bits in LCLoad/StoreBlocks,
 // dropping MEM2's bit 28. Keep it, as libogc2 does. Two queued 4 KiB transfers
 // use a zero block-count encoding (=128 cache lines), then drain the queue.
+static u32 MemoryDmaLower(u32 lc,bool load)
+{
+    // DMAL holds the cache tag address, not an offset within the 16 KiB bank.
+    // Preserve 0xe0000000 to match the tags allocated by LCEnable.
+    return (lc&~31u)|(load ? 0x12u : 0x02u);
+}
 static bool MemoryDma(u8 *lc,u8 *ram,bool load)
 {
 #if defined(GEKKO)
     for(unsigned offset=0;offset<HotBlock;offset+=4096) {
         u32 upper=(u32)(ram+offset)&0x1fffffe0u;
-        u32 lower=((u32)(lc+offset)&0x3fe0u)|(load ? 0x12u : 0x02u);
+        u32 lower=MemoryDmaLower((u32)(lc+offset),load);
         __asm__ volatile("sync; mtspr 922,%0; mtspr 923,%1"::"r"(upper),"r"(lower):"memory");
     }
 #else
@@ -101,11 +107,17 @@ struct LockedCacheState {
 #endif
 };
 
+static bool MemoryCheckpoint(FILE *out)
+{
+    // fflush alone can leave FAT file length/directory metadata unpublished.
+    // Persist diagnostic rows outside the measured interval before the next kernel.
+    return fflush(out)==0 && fsync(fileno(out))==0;
+}
 static bool MemoryRow(FILE *out,const char *operation,const char *src,const char *dst,
                       unsigned block,unsigned repeat,u64 ticks,bool verified)
 {
     return fprintf(out,"%s,%s,%s,%u,%u,%u,%llu,%u\n",operation,src,dst,block,repeat,
-                   MemoryBytes,ticks_to_microsecs(ticks),verified)>0 && fflush(out)==0 && verified && ticks;
+                   MemoryBytes,ticks_to_microsecs(ticks),verified)>0 && MemoryCheckpoint(out) && verified && ticks;
 }
 
 static u32 MemoryInfo(unsigned address)
@@ -160,7 +172,7 @@ void RunMemoryBenchmark(const char *directory)
     const char *names[]={"MEM1","MEM2"};
     u32 seed=42,reference[2]={0,0};
     if(out) {
-        if(fprintf(out,"operation,source,destination,block_bytes,repeat,bytes,ticks_us,verified\n")<=0 || fflush(out)!=0) okay=false;
+        if(fprintf(out,"operation,source,destination,block_bytes,repeat,bytes,ticks_us,verified\n")<=0 || !MemoryCheckpoint(out)) okay=false;
         // Keep partial measurements available after a native timeout.
         for(unsigned i=0;i<MemoryBlock;++i) {
             seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;
@@ -195,7 +207,7 @@ void RunMemoryBenchmark(const char *directory)
         printf("Memory benchmark: starting LC and hot CPU loops\n");fflush(stdout);
         fflush(out);
         LockedCacheState state;
-        const bool enabled=state.enable();
+        const bool enabled=okay && state.enable();
         okay=okay && enabled;
         u8 *lc=enabled ? (u8*)LCGetBase() : NULL;
         for(unsigned region=0;okay && region<3;++region) {

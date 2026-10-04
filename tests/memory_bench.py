@@ -13,12 +13,16 @@ harness=r'''
 #include <chrono>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <cerrno>
 #include <zlib.h>
 
 using u8=unsigned char;using u32=unsigned int;using u64=unsigned long long;
 #define WX_DEBUG_BUILD 1
 struct Info{unsigned fordblks;};Info mallinfo(){return {1048576};}
 bool lcEnabled=false,failAlloc=false,corrupt=false,stall=false,queued=false;unsigned allocations=0;
+bool failSync=false;unsigned syncCalls=0,lcActivations=0;
+int benchFsync(int fd){++syncCalls;if(failSync){errno=EIO;return -1;}return fsync(fd);}
+#define fsync benchFsync
 unsigned char lc[16384] __attribute__((aligned(32)));
 u64 gettime(){return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
 u64 ticks_to_microsecs(u64 t){return t/1000;}
@@ -27,7 +31,7 @@ unsigned MEM2_freesize(){return 1048576;}unsigned SYS_GetArena1Size(){return 0;}
 void *MEM1_memalign(unsigned,unsigned n){return alloc(n);}void *MEM2_alloc(unsigned n){return alloc(n);}
 void release(void *p){if(p){--allocations;free(p);}}
 void MEM1_free(void *p){release(p);}void MEM2_free(void *p){release(p);}
-void LCEnable(){assert(!lcEnabled);lcEnabled=true;memset(lc,0,sizeof(lc));}
+void LCEnable(){assert(!lcEnabled);++lcActivations;lcEnabled=true;memset(lc,0,sizeof(lc));}
 void LCDisable(){assert(lcEnabled);lcEnabled=false;}
 void *LCGetBase(){assert(lcEnabled);return lc;}
 unsigned LCQueueLength(){return queued ? 1 : 0;}void LCFlushQueue(){queued=false;}
@@ -39,6 +43,9 @@ harness+=source+r'''
 bool exists(const char *p){struct stat s;return stat(p,&s)==0;}
 void complete(const char *p,int value){FILE *f=fopen(p,"rb");assert(f && fgetc(f)==value);fclose(f);assert(!lcEnabled && allocations==0);}
 int main(){
+ assert(MemoryDmaLower(0xe0000000,true)==0xe0000012);
+ assert(MemoryDmaLower(0xe0001000,true)==0xe0001012);
+ assert(MemoryDmaLower(0xe0000000,false)==0xe0000002);
  assert(MemoryArenaBytes(0,0x81800000,0x80000000,25165824)==0);
  assert(MemoryArenaBytes(0x80004000,0x81800000,0x80000000,25165824)==25165824-0x4000);
  assert(MemoryArenaBytes(0x90000800,0x93500000,0x90000000,67108864)==0x3500000-0x800);
@@ -52,7 +59,10 @@ int main(){
  while(fgets(line,sizeof(line),f)){char op[32],src[16],dst[16];unsigned block,repeat,bytes,verified;u64 us;
   assert(sscanf(line,"%31[^,],%15[^,],%15[^,],%u,%u,%u,%llu,%u",op,src,dst,&block,&repeat,&bytes,&us,&verified)==8);
   assert(verified && bytes==8388608 && us>0 && repeat<3);++rows;
- }fclose(f);assert(rows==48);
+ }fclose(f);assert(rows==48 && syncCalls==49);
+ unsigned beforeSyncFailure=lcActivations;
+ failSync=true;RunMemoryBenchmark("sd:/sync-fail");complete("sd:/sync-fail/memory-complete",'0');failSync=false;
+ assert(lcActivations==beforeSyncFailure);
  failAlloc=true;RunMemoryBenchmark("sd:/oom");complete("sd:/oom/memory-complete",'0');failAlloc=false;
  corrupt=true;RunMemoryBenchmark("sd:/corrupt");complete("sd:/corrupt/memory-complete",'0');corrupt=false;
  stall=true;RunMemoryBenchmark("sd:/timeout");complete("sd:/timeout/memory-complete",'0');assert(!queued);
