@@ -27,6 +27,9 @@
 GuiImageData::GuiImageData()
 {
 	data = NULL;
+#if WX_PROBE_LEVEL > 0
+	dataSize = 0;
+#endif
 	AnimGif = NULL;
 	width = 0;
 	height = 0;
@@ -39,6 +42,9 @@ GuiImageData::GuiImageData()
 GuiImageData::GuiImageData(const u8 * img, int imgSize)
 {
 	data = NULL;
+#if WX_PROBE_LEVEL > 0
+	dataSize = 0;
+#endif
 	AnimGif = NULL;
 	width = 0;
 	height = 0;
@@ -53,6 +59,7 @@ GuiImageData::~GuiImageData()
 {
 	if(data)
 	{
+		WX_MEMORY_FREE(GPU, WX_MEM_GUI_TEXTURE, data, dataSize);
 		free(data);
 		data = NULL;
 	}
@@ -68,9 +75,18 @@ void GuiImageData::LoadImage(const u8 *img, int imgSize)
 
 	if(data)
 	{
+		WX_MEMORY_FREE(GPU, WX_MEM_GUI_TEXTURE, data, dataSize);
 		free(data);
 		data = NULL;
 	}
+
+	delete AnimGif;
+	AnimGif = NULL;
+	width = height = 0;
+	format = GX_TF_RGBA8;
+#if WX_PROBE_LEVEL > 0
+	dataSize = 0;
+#endif
 
 	gdImagePtr gdImg = 0;
 
@@ -139,6 +155,10 @@ void GuiImageData::LoadImage(const u8 *img, int imgSize)
 
 	data = GDImageToRGBA8(&gdImg, &width, &height);
 	gdImageDestroy(gdImg);
+#if WX_PROBE_LEVEL > 0
+	dataSize = data ? (size_t)width * height * 4 : 0;
+#endif
+	WX_MEMORY_ALLOC(GPU, WX_MEM_GUI_TEXTURE, data, dataSize);
 }
 
 void GuiImageData::LoadTPL(const u8 *img, int imgSize)
@@ -155,7 +175,11 @@ void GuiImageData::LoadTPL(const u8 *img, int imgSize)
 	{
 		int len =  ALIGN32(TplFile.GetTextureSize(0));
 
+#if WX_PROBE_LEVEL > 0
+		dataSize = len;
+#endif
 		data = (u8 *) memalign(32, len);
+		WX_MEMORY_ALLOC(GPU, WX_MEM_GUI_TEXTURE, data, dataSize);
 		if(!data)
 			return;
 

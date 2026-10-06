@@ -17,7 +17,7 @@ static Snapshot snapshots[8];
 static unsigned head,count,dropped,serial,flushed,window,written;
 static bool outputFailed;
 static const char *names[]={"copy_io","zip_pack_io","zip_extract_io","rar_stored_io",
-    "seven_sdk","ftp_stack","ftp_core","home_overlay"};
+    "seven_sdk","ftp_stack","ftp_core","home_overlay","gui_texture","directory_path"};
 
 void wx_memory_record(unsigned owner,uintptr_t address,uint64_t bytes,int allocate)
 {

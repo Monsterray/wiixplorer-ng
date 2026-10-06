@@ -1,7 +1,8 @@
 # Memory optimization plan
 
 Status: allocator correctness implemented in v0.1.8; initial explicit-owner
-accounting implemented in v0.1.9. Media/browser accounting and placement
+accounting implemented in v0.1.9 and extended to static GUI textures and
+DirList path strings in v0.1.10. Decoder/container accounting and placement
 stages remain planned. The original sequence is based
 on the v0.1.6 source audit and measurements in [MEMORY.md](MEMORY.md).
 
@@ -128,6 +129,58 @@ Production bank placement, cache aliases, LC use and buffer defaults remain
 unchanged. Next, extend accounting to media/browser owners and permitted
 workload combinations, then establish reserves before moving individual bulk
 owners to cached MEM2. Do not infer safe stack reductions from one FTP run.
+
+### Texture and directory lifetimes (v0.1.10)
+
+GPU level 1 now accounts for `GuiImageData` static decoded RGBA8 and TPL
+texture allocations, including retained resources and repeated replacement.
+A debug-only requested-size field adds four bytes per Wii `GuiImageData`
+object; release layout and instrumentation overhead remain unchanged. IO
+level 1 counts `DirList`/`DirListAsync` owned path strings. Vector capacity,
+FileBrowser's separate item metadata, libgd decoded images, animated GIF
+frames and decoder workspace remain unattributed. Do not treat these counters
+as the entire image/browser memory footprint.
+
+The summed fixed probe storage increases to 2,173 bytes (excluding alignment,
+code/strings and temporary I/O/stack use). The ten-owner maximum row batch still
+fits the reserved 10 KiB within the existing 64 KiB report limit. No new worker,
+idle scans, allocation registry or release probes were introduced.
+
+Production-function ASan/UBSan tests reproduced and fixed an animated-image
+reload leak, stale dimensions/format after a failed decode, and directory
+normalization using a string length captured before duplicate slashes were
+removed. The directory comparator now returns false for case-insensitive
+identical paths, as required by `std::sort`'s strict ordering contract. Tests
+cover GIF-to-GIF/PNG/TPL replacement and destruction, invalid image decoding,
+normalized device roots and balanced path/texture counters at levels 0 and 1.
+Codec decoding in these lifetime tests is stubbed; they do not validate the
+legacy GIF/TPL parsers or GPU consumption timing.
+
+Final level-3 Dolphin profile `build/dolphin.6RiBMS` passed UI/browser controls,
+HOME, file roundtrip, exception checks and completed guest/core exit. GUI
+textures peaked at 1,346,624 requested MEM1 bytes (46 allocation/release pairs),
+HOME at 614,400 bytes, and both ended at zero. No accounting or MEM2 integrity
+errors were reported. DirList path strings were covered by host tests; this
+smoke workflow did not create that owner on target.
+
+Shared queue job `20261006-003555-54844b` passed the exact frozen DOL on
+physical Wii (66 seconds), returned to HBC 1.10.0 and restored original SD
+settings/reports. Artifacts are in ignored `build/wii.2lweru85`. GUI texture and
+HOME owners returned to zero, without accounting or MEM2 integrity errors.
+Host `make check`, debug level 3 and release builds passed; release symbol
+inspection confirmed the memory probes are absent. Real animated-image reload,
+malformed media and concurrent viewer/transfer workloads still require target
+validation after their decoder/ownership audits.
+
+Audit follow-ups before placement experiments: movie frame reallocation tests
+must include height-only changes, allocation failure and render/decode/GX
+ownership; its decoder currently converts through an unchecked allocation.
+Legacy GIF/TPL metadata parsing and PDF page dimension/allocation arithmetic
+also need dedicated malformed-input tests before claiming bounded decoding.
+Font-file reads still need checked seek/size/read/close behavior. Extend owner
+coverage there separately, retain existing bank/cache/buffer policies, and
+collect real viewer/decoder plus concurrent transfer workloads before setting
+numeric reserves.
 
 Correctness and data safety come first, followed by bounded resources,
 compatibility and measured performance. Keep changes confined to individual

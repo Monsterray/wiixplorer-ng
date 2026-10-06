@@ -36,6 +36,7 @@
 
 #include "Tools/StringTools.h"
 #include "DirList.h"
+#include "Diagnostics/MemoryProbes.h"
 
 DirList::DirList()
 {
@@ -62,10 +63,11 @@ bool DirList::LoadPath(const char * folder, const char *filter, u32 flags)
 	Filter = filter;
 
 	std::string folderpath(folder);
-	u32 length = folderpath.size();
+
 
 	//! clear path of double slashes
 	RemoveDoubleSlashs(folderpath);
+	u32 length = folderpath.size();
 
 	//! remove last slash if exists
 	if(length > 0 && folderpath[length-1] == '/')
@@ -116,7 +118,7 @@ bool DirList::InternalLoadPath(std::string &folderpath)
 
 		if(Filter)
 		{
-			char * fileext = strrchr(filename, '.');
+			const char * fileext = strrchr(filename, '.');
 			if(!fileext)
 				continue;
 
@@ -143,6 +145,7 @@ void DirList::AddEntrie(const std::string &filepath, const char * filename, bool
 	FileInfo.resize(pos+1);
 
 	FileInfo[pos].FilePath = (char *) malloc(filepath.size()+strlen(filename)+2);
+	WX_MEMORY_ALLOC(IO, WX_MEM_DIR_PATH, FileInfo[pos].FilePath, filepath.size()+strlen(filename)+2);
 	if(!FileInfo[pos].FilePath)
 	{
 		FileInfo.resize(pos);
@@ -158,7 +161,10 @@ void DirList::ClearList()
 	for(u32 i = 0; i < FileInfo.size(); ++i)
 	{
 		if(FileInfo[i].FilePath)
+		{
+			WX_MEMORY_FREE(IO, WX_MEM_DIR_PATH, FileInfo[i].FilePath, strlen(FileInfo[i].FilePath)+1);
 			free(FileInfo[i].FilePath);
+		}
 	}
 
 	FileInfo.clear();
@@ -181,10 +187,7 @@ static bool SortCallback(const DirEntry & f1, const DirEntry & f2)
 	if(f1.FilePath && !f2.FilePath) return true;
 	if(!f1.FilePath) return false;
 
-	if(strcasecmp(f1.FilePath, f2.FilePath) > 0)
-		return false;
-
-	return true;
+	return strcasecmp(f1.FilePath, f2.FilePath) < 0;
 }
 
 void DirList::SortList()

@@ -18,6 +18,7 @@
 #define GUI_IMAGEDATA_H_
 
 #include <gctypes.h>
+#include "Diagnostics/MemoryProbes.h"
 #include <gd.h>
 #include "ImageOperations/GifImage.hpp"
 
@@ -51,6 +52,9 @@ class GuiImageData
 	protected:
 		void LoadTPL(const u8 *img, int imgSize);
 
+#if WX_PROBE_LEVEL > 0
+		size_t dataSize; // Requested texture capacity, debug accounting only.
+#endif
 		u8 * data; //!< Image data
 		int height; //!< Height of image
 		int width; //!< Width of image
