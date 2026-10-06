@@ -1,3 +1,4 @@
+#include "Diagnostics/MemoryProbes.h"
 #include "Diagnostics/Probes.h"
 /***************************************************************************
  * Copyright (C) 2009
@@ -219,9 +220,11 @@ void Menu_Render()
 
 void Video_ShowHbcHome()
 {
+    WX_MEMORY_OPERATION("home_begin", "home_end");
 	GX_DrawDone();
 	// Lend the off-screen XFB and a temporary MEM1 buffer: VI cannot use MEM2.
 	void *extra = MEM1_memalign(32, ALIGN32(2 * vmode->fbWidth * vmode->xfbHeight));
+	WX_MEMORY_BUFFER(GPU, WX_MEM_HOME, extra, ALIGN32(2 * vmode->fbWidth * vmode->xfbHeight));
 	if (!extra) {
 		printf("HBC HOME: not enough MEM1 for a stable overlay\n");
 		return;

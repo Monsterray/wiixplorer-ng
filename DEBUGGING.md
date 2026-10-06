@@ -579,3 +579,20 @@ Artifacts are `build/wii.hmk9lcnb`, with the same frozen DOL as the accepted
 Dolphin run. Actual K0/K1 pointers and three-run medians are in MEMORY.md.
 A host negative test also rejects a duplicate row hiding a missing alias/repeat
 while restoring SD originals. Release ELF excludes the alias/memory kernels.
+
+### Memory owner reports
+
+Debug owner counters follow the IO, NETWORK and GPU probe groups at level 1.
+Use `make debug PROBE_LEVEL=3` for CPU transition/fragmentation snapshots,
+MEM2 integrity checks and FTP stack high-water measurements (THREADS enabled).
+The report is `sd:/apps/WiiXplorer/memory-probes.csv`; release removes this
+instrumentation. See [MEMORY-PLAN.md](MEMORY-PLAN.md) for coverage and limits.
+
+Exercise archives and copy separately with `scripts/dolphin.sh --build debug
+--bench archive` or `--bench copy`, then run `scripts/hbc-smoke.py --profile
+PROFILE --archive-device sd` or `--copy-bench`, followed by
+`scripts/check-dolphin-smoke.py PROFILE`. The checker validates accounting and
+integrity errors and zero tracked live bytes after teardown, and saves the
+final report in the profile. Native smoke captures/restores this report along
+with existing settings/probes. Always submit its exact Dolphin-passed artifact
+through the shared Wii dev queue. Timing from Dolphin is not drive bandwidth.

@@ -40,6 +40,21 @@ try:
                 int(row[key])
             if row['group'] in ('cpu','gpu') and row['level']=='3' and int(row['value']):
                 raise ValueError('CPU/GPU integrity probe failed')
+        memory=profile/'Load/WiiSDSync/apps/WiiXplorer/memory-probes.csv'
+        if memory.exists():
+            with memory.open(newline='') as f: memory_rows=list(csv.DictReader(f))
+            last={}
+            for row in memory_rows:
+                if None in row or any(value is None for value in row.values()):
+                    raise ValueError('Incomplete memory probe row')
+                if row['kind']=='owner':
+                    if int(row['accounting_errors']): raise ValueError('Memory accounting mismatch')
+                    last[(row['owner'],row['bank'])]=row
+                if row['kind']=='snapshot' and int(row['integrity_errors']):
+                    raise ValueError('Memory snapshot integrity failure')
+            if any(int(row['live_bytes']) for row in last.values()):
+                raise ValueError('Tracked operation buffers remain live after teardown')
+            (profile/'memory-probes.csv').write_bytes(memory.read_bytes())
         smoke = profile/'Load/WiiSDSync/apps/WiiXplorer/smoke-frames.txt'
         if 'cpu' in info['probe_groups']:
             updates = sum(int(r['count']) for r in rows if r['group']=='cpu' and r['level']=='1')

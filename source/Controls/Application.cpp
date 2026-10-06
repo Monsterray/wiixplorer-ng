@@ -1,3 +1,4 @@
+#include "Diagnostics/MemoryProbes.h"
 #include "Diagnostics/Probes.h"
 /****************************************************************************
  * Copyright (C) 2009-2011 Dimok
@@ -373,6 +374,7 @@ void Application::init(void)
 
 	//! Initialize network thread if selected
 	HbcAgentInit(); // IOS reload, mounts, pads and stdout are ready now.
+	WX_MEMORY_SNAPSHOT("startup_ready");
 	if(Settings.AutoConnect || Settings.FTPServer.AutoStart)
 	{
 		InitNetworkThread();

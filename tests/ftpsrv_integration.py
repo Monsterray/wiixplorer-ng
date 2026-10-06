@@ -61,7 +61,15 @@ class DeviceHandler {public:static DeviceHandler*Instance(){static DeviceHandler
 #include "Settings.h"
 #include "DeviceControls/DeviceHandler.hpp"
 #include "FTPOperations/FTPServer.h"
+#include "Diagnostics/MemoryProbes.h"
 Config Settings={};std::atomic<int> threads(0),device_calls(0);bool mounted[MAXDEVICES]={};
+std::atomic<uint64_t> memoryLive(0),memoryPeak(0),memoryEvents(0);
+extern "C" void wx_memory_record(unsigned,uintptr_t address,uint64_t bytes,int allocate){
+ if(!address)return;
+ ++memoryEvents;
+ if(allocate){auto live=memoryLive.fetch_add(bytes)+bytes;auto peak=memoryPeak.load();while(live>peak && !memoryPeak.compare_exchange_weak(peak,live)){} }
+ else {auto live=memoryLive.fetch_sub(bytes);if(live<bytes)abort();}
+}
 bool IsNetworkInit(){return true;}void Initialize_Network(){abort();}
 extern "C" int test_core_active(void);
 extern "C" ssize_t wx_test_send(int fd,const void*b,size_t n,int flags){return send(fd,b,n>1024?(n>2048?2048:n):(n>17?17:n),flags);}
@@ -76,14 +84,14 @@ int main(int argc,char **argv){
   if(command=="hide_nand")Settings.MountISFS=0;
   if(command=="anon")Settings.FTPServer.Anonymous=1;
   if(command=="exit"){FTPServer::DestroyInstance();return 0;}
-  printf("{\"running\":%d,\"status\":%d,\"cycles\":%u,\"threads\":%d,\"core\":%d,\"devices\":%d}\n",
-   server->isRunning(),server->status(),server->cycles(),threads.load(),test_core_active(),device_calls.load());
+  printf("{\"running\":%d,\"status\":%d,\"cycles\":%u,\"threads\":%d,\"core\":%d,\"devices\":%d,\"memory_live\":%llu,\"memory_peak\":%llu,\"memory_events\":%llu}\n",
+   server->isRunning(),server->status(),server->cycles(),threads.load(),test_core_active(),device_calls.load(),(unsigned long long)memoryLive.load(),(unsigned long long)memoryPeak.load(),(unsigned long long)memoryEvents.load());
   fflush(stdout);
  }
  FTPServer::DestroyInstance();return 0;
 }
 ''')
-    flags=['-g','-fsanitize=address,undefined','-I'+str(tmp),'-I'+str(ROOT/'source'),'-pthread']
+    flags=['-g','-fsanitize=address,undefined','-I'+str(tmp),'-I'+str(ROOT/'source'),'-pthread','-DWX_PROBE_LEVEL=1','-DWX_PROBE_NETWORK=1','-DWX_PROBE_CPU=0','-DWX_PROBE_GPU=0','-DWX_PROBE_IO=0','-DWX_PROBE_THREADS=0']
     subprocess.run([os.environ.get('CC','cc'),'-std=gnu99',*flags,'-Dsend=wx_test_send','-c',str(tmp/'core.c'),'-o',str(tmp/'core.o')],check=True)
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++11',*flags,str(ROOT/'source/FTPOperations/FTPServer.cpp'),str(ROOT/'source/FTPOperations/WiiXplorerFtpVfs.cpp'),str(tmp/'app.cpp'),str(tmp/'core.o'),'-o',str(tmp/'server')],check=True)
     for dev in ('sd:','usb1:','nand:'):(tmp/dev).mkdir()
@@ -106,12 +114,12 @@ int main(int argc,char **argv){
             raise AssertionError('disabled FTP still listens')
         try:
             before=command('status');time.sleep(.12);after=command('status')
-            assert before==after and before['threads']==before['core']==before['cycles']==before['devices']==0
+            assert before==after and before['threads']==before['core']==before['cycles']==before['devices']==0 and before['memory_live']==before['memory_events']==0
             refused()
             with socket.socket() as occupied:
                 occupied.bind(('0.0.0.0',port));occupied.listen()
-                failed=command('enable');assert not failed['running'] and failed['threads']==failed['core']==0
-            started=command('enable');assert started['running'] and started['threads']==started['core']==1 and started['devices']==0
+                failed=command('enable');assert not failed['running'] and failed['threads']==failed['core']==0 and failed['memory_live']==0
+            started=command('enable');assert started['running'] and started['threads']==started['core']==1 and started['devices']==0 and started['memory_live']>32768
             with ftplib.FTP() as bad:
                 bad.connect('127.0.0.1',port,timeout=5)
                 try:bad.login('wiixplorer','wrong-password')
@@ -157,7 +165,7 @@ int main(int argc,char **argv){
             # Four live sessions, including an unfinished staged upload.
             clients=[connect() for _ in range(4)]
             data=clients[0].transfercmd('STOR /sd/preserve');data.sendall(b'partial');time.sleep(.05)
-            stopped=command('disable');assert not stopped['running'] and stopped['threads']==stopped['core']==0
+            stopped=command('disable');assert not stopped['running'] and stopped['threads']==stopped['core']==0 and stopped['memory_live']==0
             time.sleep(.15);assert command('status')==stopped;refused()
             assert (tmp/'sd:/preserve').read_bytes()==b'old destination'
             assert not list((tmp/'sd:').glob('*.wx-transfer-*'))

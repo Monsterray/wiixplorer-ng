@@ -128,6 +128,14 @@ unsigned int MEM2_largestblock()
     return std::max(g_mem2gp.LargestFreeSize(), g_mem2upper.LargestFreeSize());
 }
 
+unsigned int MEM2_heapsize()
+{
+    void *address; unsigned int size,total=0;
+    if (g_mem2gp.getEndAddress()) { g_mem2gp.info(address,size); total+=size-32; }
+    if (g_mem2upper.getEndAddress()) { g_mem2upper.info(address,size); total+=size-32; }
+    return total;
+}
+
 void *MEM1_alloc(unsigned int s)
 {
 	if (!HeapSizeValid(s)) return NULL;

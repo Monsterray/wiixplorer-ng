@@ -1,3 +1,4 @@
+#include "Diagnostics/MemoryProbes.h"
  /****************************************************************************
  * Copyright (C) 2010
  * by Dimok
@@ -107,6 +108,7 @@ extern "C" void ExitApp()
     Application::DestroyInstance();
     Resources::DestroyInstance();
     SoundHandler::DestroyInstance();
+    WX_MEMORY_SNAPSHOT("shutdown_released");
     wx_probe_flush();
     DeviceHandler::DestroyInstance();
 	ClearFontData();

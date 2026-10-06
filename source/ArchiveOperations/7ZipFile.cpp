@@ -1,3 +1,4 @@
+#include "Diagnostics/MemoryProbes.h"
 /****************************************************************************
  * Copyright (C) 2009-2011 Dimok
  *
@@ -47,8 +48,12 @@ void *SzFile::BudgetAlloc(void *p,size_t size)
 {
     BudgetAllocator *allocator=(BudgetAllocator*)p;
     if(!size || size>SIZE_MAX-sizeof(SzAllocationHeader) || *allocator->used>allocator->limit ||
-       size+sizeof(SzAllocationHeader)>allocator->limit-*allocator->used) return NULL;
+       size+sizeof(SzAllocationHeader)>allocator->limit-*allocator->used) {
+        WX_MEMORY_ALLOC(IO, WX_MEM_SEVEN_SDK, NULL, size);
+        return NULL;
+    }
     SzAllocationHeader *header=(SzAllocationHeader*)malloc(size+sizeof(*header));
+    WX_MEMORY_ALLOC(IO, WX_MEM_SEVEN_SDK, header, size+sizeof(*header));
     if(!header) return NULL;
     header->size=size+sizeof(*header); *allocator->used+=header->size;
     return header+1;
@@ -58,7 +63,9 @@ void SzFile::BudgetFree(void *p,void *address)
     if(!address) return;
     SzAllocationHeader *header=(SzAllocationHeader*)address-1;
     BudgetAllocator *allocator=(BudgetAllocator*)p;
-    *allocator->used-=header->size; free(header);
+    *allocator->used-=header->size;
+    WX_MEMORY_FREE(IO, WX_MEM_SEVEN_SDK, header, header->size);
+    free(header);
 }
 SzFile::SzFile(const char *path): SzResult(SZ_ERROR_FAIL),Allocated(0),Decoded(NULL),DecodedSize(0),SzBlockIndex(0xffffffff)
 {
@@ -181,11 +188,13 @@ int SzFile::ExtractMember(int index,const char *root,bool withpath)
 }
 int SzFile::ExtractFile(int index,const char *root,bool withpath)
 {
+    WX_MEMORY_OPERATION("seven_begin", "seven_end");
     MainAlloc.limit=TempAlloc.limit=std::min<size_t>(16u*1024u*1024u,Allocated+wx_archive_memory_budget());
     int result=ExtractMember(index,root,withpath); FreeDecoded(); return result;
 }
 int SzFile::ExtractAll(const char *root)
 {
+    WX_MEMORY_OPERATION("seven_all_begin", "seven_all_end");
     if(SzResult!=SZ_OK || !ArchivePreflight(*this,root)) return -1;
     MainAlloc.limit=TempAlloc.limit=std::min<size_t>(16u*1024u*1024u,Allocated+wx_archive_memory_budget());
     int result=1;

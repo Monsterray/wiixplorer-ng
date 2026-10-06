@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "Probes.h"
+#include "MemoryProbes.h"
 #if WX_PROBE_LEVEL > 0
 #include <gccore.h>
 #include <ogc/machine/processor.h>
@@ -28,6 +29,7 @@ void wx_probe_record(unsigned group, unsigned level, uint64_t start, uint32_t va
 }
 void wx_probe_flush(void)
 {
+    wx_memory_flush();
     // Cap each boot's output at 1 MiB. Retain counters for GDB if no SD is mounted.
     if (written >= 1024*1024) return;
     FILE *f = fopen("sd:/apps/WiiXplorer/probes.csv", sequence ? "a" : "w");

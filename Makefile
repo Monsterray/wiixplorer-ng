@@ -101,6 +101,8 @@ $(OUTPUT).dol: $(OUTPUT).elf
 debug release:
 	$(MAKE) CONFIG=$@ all
 check:
+	CXX="$(HOST_CXX)" python3 tests/network_receive.py
+	CXX="$(HOST_CXX)" python3 tests/memory_probes.py
 	CXX="$(HOST_CXX)" python3 tests/memory_allocator.py
 	CXX="$(HOST_CXX)" python3 tests/archives.py
 	CXX="$(HOST_CXX)" python3 tests/archive_fs.py

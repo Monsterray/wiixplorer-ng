@@ -1,3 +1,4 @@
+#include "Diagnostics/MemoryProbes.h"
 /**
  * Copyright 2024 TotalJustice.
  * SPDX-License-Identifier: MIT
@@ -1602,6 +1603,7 @@ int ftpsrv_init(const struct FtpSrvConfig* cfg) {
         rc = -1;
     } else {
         ftp_state = calloc(1, sizeof(*ftp_state));
+        WX_MEMORY_ALLOC(NETWORK, WX_MEM_FTP_CORE, ftp_state, sizeof(*ftp_state));
         if (!ftp_state) { errno = ENOMEM; return -1; }
         memcpy(&g_ftp.cfg, cfg, sizeof(*cfg));
         g_ftp.initialised = 1;
@@ -1761,6 +1763,7 @@ void ftpsrv_exit(void) {
     /* Clear credentials and release the entire buffer/session arena. */
     volatile unsigned char *secret = (volatile unsigned char *)ftp_state;
     for (size_t i = 0; i < sizeof(*ftp_state); ++i) secret[i] = 0;
+    WX_MEMORY_FREE(NETWORK, WX_MEM_FTP_CORE, ftp_state, sizeof(*ftp_state));
     free(ftp_state);
     ftp_state = NULL;
 }

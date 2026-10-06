@@ -1,3 +1,4 @@
+#include "Diagnostics/MemoryProbes.h"
 #include "TransferFile.h"
 #include "Diagnostics/Probes.h"
 /****************************************************************************
@@ -341,6 +342,7 @@ int CopyFile(const char * src, const char * dest, u32 bufferSize)
 	if (!src || !dest || !strcasecmp(src, dest) || bufferSize < 16 || bufferSize > 256*1024) return -1;
 	WX_SCOPE(IO);
 	WX_PROBE(IO, 1, 1);
+	WX_MEMORY_OPERATION("copy_begin", "copy_end");
 	u32 read;
 	u32 wrote;
 
@@ -380,6 +382,7 @@ int CopyFile(const char * src, const char * dest, u32 bufferSize)
 	while (!buffer && blksize > 32*1024) {
 		blksize /= 2; buffer = (u8 *)memalign(32, blksize);
 	}
+	WX_MEMORY_BUFFER(IO, WX_MEM_COPY, buffer, blksize);
 
 	if(buffer == NULL){
 		//no memory

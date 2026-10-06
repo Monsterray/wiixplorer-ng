@@ -1,3 +1,4 @@
+#include "Diagnostics/MemoryProbes.h"
  /****************************************************************************
  * Copyright (C) 2010
  * by Dimok
@@ -63,6 +64,8 @@ void FTPServer::stopLocked()
         LWP_JoinThread(worker, NULL);
         worker = LWP_THREAD_NULL;
     }
+    WX_MEMORY_STACK(WX_MEM_FTP_STACK, stack, 32768);
+    WX_MEMORY_FREE(NETWORK, WX_MEM_FTP_STACK, stack, 32768);
     free(stack); stack = NULL;
     // The worker owns core cleanup. Startup failures clean up synchronously.
     ftp_running = false;
@@ -73,6 +76,7 @@ void FTPServer::StartupFTP()
 {
     lockLifecycle();
     if (ftp_running) { unlockLifecycle(); return; }
+    WX_MEMORY_OPERATION("ftp_start_begin", "ftp_start_end");
     stopLocked();
     if (!Settings.FTPServer.Port || !Settings.FTPServer.IdleTimeout ||
         (!Settings.FTPServer.Anonymous && (!Settings.FTPServer.User[0] || !Settings.FTPServer.Password[0])) ||
@@ -85,7 +89,11 @@ void FTPServer::StartupFTP()
     if (!IsNetworkInit()) { listenerStatus = -ENETDOWN; unlockLifecycle(); return; }
     stopRequested = false;
     stack = memalign(32, 32768);
+    WX_MEMORY_ALLOC(NETWORK, WX_MEM_FTP_STACK, stack, 32768);
     if (!stack) { stopRequested = true; listenerStatus = -ENOMEM; unlockLifecycle(); return; }
+#if WX_PROBE_THREADS && WX_PROBE_LEVEL >= 2
+    memset(stack, 0xa5, 32768);
+#endif
     int rc;
 #if WX_FTP_LEGACY
     MountVirtualDevices();
@@ -121,6 +129,7 @@ void FTPServer::StartupFTP()
 #else
         ftpsrv_exit();
 #endif
+        WX_MEMORY_FREE(NETWORK, WX_MEM_FTP_STACK, stack, 32768);
         free(stack); stack = NULL; worker = LWP_THREAD_NULL;
         listenerStatus = rc == -1 ? -EIO : rc;
     } else {
@@ -136,6 +145,7 @@ void FTPServer::ShutdownFTP()
     const bool active = worker != LWP_THREAD_NULL;
     stopLocked();
     unlockLifecycle();
+    if(active) WX_MEMORY_SNAPSHOT("ftp_stopped");
     if (active) gxprintf("%s",tr("Server was shutdown...\n"));
 }
 void *FTPServer::threadEntry(void *arg) { static_cast<FTPServer *>(arg)->executeThread(); return NULL; }

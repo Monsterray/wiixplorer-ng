@@ -20,7 +20,7 @@ def function(path, signature):
     return source[start:end]
 
 
-transfer = '#include \"' + str(ROOT / 'source/Diagnostics/Probes.h') + '\"\n' + r'''
+transfer = '#include \"' + str(ROOT / 'source/Diagnostics/MemoryProbes.h') + '\"\n' + r'''
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>

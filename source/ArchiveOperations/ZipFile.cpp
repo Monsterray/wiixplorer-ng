@@ -1,3 +1,4 @@
+#include "Diagnostics/MemoryProbes.h"
 /****************************************************************************
  * Copyright (C) 2009-2011 Dimok
  *
@@ -101,6 +102,7 @@ bool ZipFile::FinishWrite(bool success)
            !WriteOutput->Commit()) okay=false;
     }
     delete WriteOutput; WriteOutput=NULL;
+    WX_MEMORY_FREE(IO, WX_MEM_ZIP_PACK, IOBuffer, 1024*70);
     free(IOBuffer); IOBuffer=NULL;
     WriteFailed=false;
     if(writing && okay) { OpenMode=APPEND; return LoadList(); }
@@ -231,7 +233,10 @@ int ZipFile::AddMember(const char *source,const char *member,int level,bool refr
     FILE *input=NULL;
     if(result>0 && !directory) {
         input=fopen(source,"rb");
-        if(!IOBuffer) IOBuffer=(u8*)malloc(1024*70);
+        if(!IOBuffer) {
+            IOBuffer=(u8*)malloc(1024*70);
+            WX_MEMORY_ALLOC(IO, WX_MEM_ZIP_PACK, IOBuffer, 1024*70);
+        }
         struct stat openedStat;
         if(!input || !IOBuffer || fstat(fileno(input),&openedStat)!=0 || !S_ISREG(openedStat.st_mode) || openedStat.st_size!=st.st_size) result=-1;
     }
@@ -336,15 +341,19 @@ int ZipFile::ExtractMember(int index,const char *root,bool withpath,void *buffer
 }
 int ZipFile::ExtractFile(int index,const char *root,bool withpath)
 {
+    WX_MEMORY_OPERATION("zip_begin", "zip_end");
     void *buffer=malloc(1024*50);
+    WX_MEMORY_BUFFER(IO, WX_MEM_ZIP_EXTRACT, buffer, 1024*50);
     if(!buffer) return -1;
     int result=ExtractMember(index,root,withpath,buffer,1024*50);
     free(buffer); return result;
 }
 int ZipFile::ExtractAll(const char *root)
 {
+    WX_MEMORY_OPERATION("zip_all_begin", "zip_all_end");
     if(!ListValid || !SwitchMode(OPEN) || !ArchivePreflight(*this,root)) return -1;
     void *buffer=malloc(1024*70);
+    WX_MEMORY_BUFFER(IO, WX_MEM_ZIP_EXTRACT, buffer, 1024*70);
     if(!buffer) return -1;
     int result=1;
     for(unsigned i=0;i<ZipStructure.size() && result>0;++i) result=ExtractMember(i,root,true,buffer,1024*70);

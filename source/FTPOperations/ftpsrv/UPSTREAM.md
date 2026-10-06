@@ -16,6 +16,10 @@ public headers are unchanged. To update, compare the new upstream revision,
 reapply/review the patch, update this provenance and rerun the host/device tests.
 Builds use committed source and need no network or sibling checkout.
 
+Debug memory probes count the core arena's allocation and release, without
+callbacks or allocation tracking. They compile away in release and perform
+no work while FTP is disabled. `LOCAL.patch` includes these hooks.
+
 Local core changes:
 
 - Include the WiiXplorer build configuration (four sessions, a shared 32 KiB

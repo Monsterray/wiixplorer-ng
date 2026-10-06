@@ -26,6 +26,7 @@ unsigned int MEM2_usableSize(void *p);
 unsigned int MEM2_freesize();
 // Explicit snapshot: scans the pools; no background accounting or polling.
 unsigned int MEM2_largestblock();
+unsigned int MEM2_heapsize();
 bool MEM2_check();
 
 #ifdef __cplusplus

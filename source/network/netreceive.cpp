@@ -50,8 +50,7 @@ void IncommingConnection(NetReceiver & Receiver)
 			{
 				CopyHomebrewMemory((u8*) buffer, 0, Receiver.GetFilesize());
 
-				ItemStruct * Item = new ItemStruct;
-				memset(&Item, 0, sizeof(ItemStruct));
+				ItemStruct * Item = new ItemStruct();
 
 				Item->itempath = strdup("WiiLoad");
 				Item->itemsize = Receiver.GetFilesize();

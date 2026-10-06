@@ -9,7 +9,7 @@ ROOT=Path(__file__).resolve().parents[1]
 def stripped(path):
     return '\n'.join(x for x in (ROOT/path).read_text().splitlines() if not x.startswith('#include'))
 
-common=r'''
+common='#include \"'+str(ROOT/'source/Diagnostics/MemoryProbes.h')+'\"\n'+r'''
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

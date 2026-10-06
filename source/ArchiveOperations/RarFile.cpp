@@ -1,3 +1,4 @@
+#include "Diagnostics/MemoryProbes.h"
 /****************************************************************************
  * Copyright (C) 2009-2011 Dimok
  *
@@ -45,7 +46,7 @@ RarFile::RarFile(const char *filepath): ListValid(false),StoreBuffer(NULL)
 RarFile::~RarFile()
 {
 	if(!Password.empty()) { volatile char *p=&Password[0]; for(size_t i=0;i<Password.size();++i) p[i]=0; }
-	free(StoreBuffer);
+	WX_MEMORY_FREE(IO, WX_MEM_RAR_STORE, StoreBuffer, 0x10000); free(StoreBuffer);
 	ClearList();
 	RarArc.Close();
 }
@@ -200,7 +201,7 @@ private:
 
 void RarFile::UnstoreFile(ComprDataIO &DataIO, int64 DestUnpSize)
 {
-	if(!StoreBuffer) StoreBuffer=(byte*)malloc(0x10000);
+	if(!StoreBuffer) { StoreBuffer=(byte*)malloc(0x10000); WX_MEMORY_ALLOC(IO, WX_MEM_RAR_STORE, StoreBuffer, 0x10000); }
     if(!StoreBuffer) throw std::bad_alloc();
 	while (1)
 	{
@@ -262,7 +263,7 @@ int RarFile::InternalExtractFile(int index,const char *root,bool withpath)
 int RarFile::ExtractFile(int index,const char *root,bool withpath)
 {
     int result=SeekFile(index) ? InternalExtractFile(index,root,withpath) : -1;
-    free(StoreBuffer); StoreBuffer=NULL; return result;
+    WX_MEMORY_FREE(IO, WX_MEM_RAR_STORE, StoreBuffer, 0x10000); free(StoreBuffer); StoreBuffer=NULL; return result;
 }
 int RarFile::ExtractAll(const char *root)
 {
@@ -270,5 +271,5 @@ int RarFile::ExtractAll(const char *root)
     int result=1;
     for(unsigned i=0;i<GetItemCount() && result>0;++i)
         result=SeekFile(i) ? InternalExtractFile(i,root,true) : -1;
-    free(StoreBuffer); StoreBuffer=NULL; return result;
+    WX_MEMORY_FREE(IO, WX_MEM_RAR_STORE, StoreBuffer, 0x10000); free(StoreBuffer); StoreBuffer=NULL; return result;
 }

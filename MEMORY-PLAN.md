@@ -1,7 +1,8 @@
 # Memory optimization plan
 
-Status: allocator correctness stage implemented in v0.1.8; subsequent owner
-accounting and placement stages remain planned. The original sequence is based
+Status: allocator correctness implemented in v0.1.8; initial explicit-owner
+accounting implemented in v0.1.9. Media/browser accounting and placement
+stages remain planned. The original sequence is based
 on the v0.1.6 source audit and measurements in [MEMORY.md](MEMORY.md).
 
 ### Implemented foundation (v0.1.8)
@@ -36,6 +37,97 @@ single workload snapshots; no owner budget, allocation placement, transfer
 buffer default, production LC use or CPU/device cache policy has changed.
 Release linking removes the unused benchmark and largest-block diagnostic
 functions. Per-owner peaks, concurrency reserves and stack accounting are next.
+
+### Initial owner accounting (v0.1.9)
+
+The existing grouped probes now account for copy I/O, ZIP compression and
+extraction I/O, stored RAR I/O, 7z SDK allocations, FTP core/worker stack and
+HOME overlay lifetimes. They record requested live/peak bytes, allocation and
+release counts, failures, largest request and accounting errors separately for
+MEM1 and MEM2. Failed allocations have an unknown bank. This is explicit owner
+accounting, not a complete allocator census: full RAR decompressor, textures,
+media decoders, fonts and browser metadata are not yet attributed.
+
+Level 1 enables cheap owner counters in the corresponding IO, NETWORK or GPU
+probe group. CPU level 2 takes transition snapshots of MEM1 allocator used/free
+bytes, MEM2 used/free bytes and largest contiguous MEM2 capacity; THREADS level
+2 prefills and measures the owned FTP stack only after its worker is joined.
+Level 3 also checks MEM2 integrity. Other thread stacks are not measured yet.
+Snapshots occur at startup, HOME/copy/archive operations, FTP lifecycle and
+shutdown; there is no idle heap scan or new worker. Disabled FTP allocates no
+FTP buffers and does no stack scan, enumeration or socket polling.
+
+The summed fixed counter/stack/snapshot storage is 1,821 bytes on Wii,
+excluding linker alignment, code, constant strings and temporary stack/stdio
+use. Eight fixed snapshot slots
+bound history; overflow increments a reported drop count. The existing main
+thread probe flush writes `sd:/apps/WiiXplorer/memory-probes.csv` only after
+an event, with a 64 KiB report bound. An unavailable SD file retains pending
+counters; a write/close error stops further appends so a partial batch is not
+silently extended. No diagnostic storage or calls remain in the release ELF.
+
+Owner bytes are requested capacities, not padded allocator consumption. The
+7z SDK owner includes its existing budget headers. MEM2 used bytes are pool
+payload capacity minus free payload, so additional allocator headers count as
+used; MEM1 values come from Newlib `mallinfo`. These are independent heap
+snapshots, not an atomic reservation against concurrent allocations. MEM1's
+largest contiguous block remains unmeasured.
+
+The final level-3 DOL passed Dolphin archive profile `build/dolphin.RNOsCm`
+(30 codec/parser/CRC/traversal/preservation cases) and copy profile
+`build/dolphin.VtuiDR`, including HOME and completed exit. The final owner rows
+had zero live bytes and no accounting or heap-integrity errors. Observed
+individual MEM1 peaks were 70 KiB for ZIP I/O, 64 KiB stored RAR, 171,912 bytes
+for 7z SDK, 256 KiB for the copy benchmark's buffer sweep and 600 KiB for HOME.
+FTP profile `build/dolphin.4ksPi3` also passed SD roundtrip/authentication,
+append/resume and idle handling; USB was absent in that emulator profile. FTP
+core requested 71,032 bytes, its worker stack 32 KiB, and the measured stack
+high-water was 9,808 bytes. Host FTP tests covered both fake SD/USB devices,
+failed startup, disable/re-enable and zero live owner bytes after shutdown.
+These peaks are workload observations, not concurrent capacity budgets or
+physical bandwidth measurements. Native FTP passive timeout remains a separate
+unresolved issue; these tests do not establish native FTP throughput.
+
+Shared Wii dev queue job `20261006-001138-5ca9af` passed the same frozen
+archive DOL on physical hardware (190 seconds), returned to HBC 1.10.0 and
+restored the original SD settings/reports. Artifacts are in ignored
+`build/wii.wbsoi_0v`. All final owner live bytes were zero, with no accounting
+or MEM2 integrity errors; observed owner peaks matched the Dolphin archive
+run. The ring reported 25 dropped transition snapshots during the rapid
+fixture batch, so its history is explicitly incomplete; owner counters remain
+cumulative. MEM2 was 51,380,000 free bytes with a 28,311,360-byte largest block
+at both startup and shutdown. These observations do not establish media or
+concurrent-workload reserves.
+
+Physical copy queue job `20261006-001227-164451` passed 15 checksum-verified
+8 MiB transfers, HOME controls and exit to HBC (250 seconds); original SD
+files were restored. Artifacts are in ignored `build/wii.vs6f5k5o`. Copy and
+HOME owners ended at zero live bytes, with no accounting or integrity errors.
+
+| Copy buffer | Median SD copy MiB/s | Verified samples |
+| --- | ---: | ---: |
+| 32 KiB | 2.014 | 3 |
+| 64 KiB | 1.944 | 3 |
+| 70 KiB | 1.812 | 3 |
+| 128 KiB | 2.069 | 3 |
+| 256 KiB | 2.175 | 3 |
+
+This small sample shows approximately 5% improvement at 256 KiB over the
+128 KiB default while doubling requested capacity. Retain the default until
+repeated SD/USB and concurrent-workload measurements justify the tradeoff.
+This change adds observability, not a measured production speed improvement.
+Host `make check`, level-3 and default level-1 debug builds, and release passed.
+Release symbol inspection found no memory-probe or heap-snapshot functions.
+
+The full rebuild also exposed a WiiLoad initialization bug: `memset(&Item, ...)`
+overwrote a pointer and adjacent stack rather than the allocated item. Value
+initialization fixes it; the production receive function has an ASan/UBSan
+regression covering accepted, rejected and failed receives.
+
+Production bank placement, cache aliases, LC use and buffer defaults remain
+unchanged. Next, extend accounting to media/browser owners and permitted
+workload combinations, then establish reserves before moving individual bulk
+owners to cached MEM2. Do not infer safe stack reductions from one FTP run.
 
 Correctness and data safety come first, followed by bounded resources,
 compatibility and measured performance. Keep changes confined to individual

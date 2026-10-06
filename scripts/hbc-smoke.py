@@ -112,7 +112,7 @@ try:
                 if error.code != hbc.ENOENT: raise
                 hbc.file_request(address,'M',directory)
                 if directory != 'sd:/apps': created_dirs.append(directory)
-        for name in ('WiiXplorer.cfg','WiiXplorer_Controls.cfg','probes.csv'):
+        for name in ('WiiXplorer.cfg','WiiXplorer_Controls.cfg','probes.csv','memory-probes.csv'):
             remote_config='sd:/apps/WiiXplorer/'+name
             try: content=hbc.get_file(address,remote_config)
             except hbc.HBCError as error:
@@ -449,6 +449,11 @@ try:
     # Fetch while mounted. The subsequent clean exit proves the final flush separately.
     probes = hbc.get_file(address,'sd:/apps/WiiXplorer/probes.csv')
     (profile/'probes.csv').write_bytes(probes)
+    try:
+        memory_probes=hbc.get_file(address,'sd:/apps/WiiXplorer/memory-probes.csv')
+        (profile/'memory-probes.csv').write_bytes(memory_probes)
+    except hbc.HBCError as error:
+        if error.code != hbc.ENOENT: raise
     key('h') # Also check remote exit while inside the overlay.
     start = time.monotonic()
     hbc.request(address,b'HBCX')
@@ -456,6 +461,8 @@ try:
         version = hbc.hbc_wait(address,30)
         (profile/'hbc-after.json').write_text(json.dumps(hbc.status(address),indent=2))
         (profile/'probes.csv').write_bytes(hbc.get_file(address,'sd:/apps/WiiXplorer/probes.csv'))
+        if (profile/'memory-probes.csv').exists():
+            (profile/'memory-probes.csv').write_bytes(hbc.get_file(address,'sd:/apps/WiiXplorer/memory-probes.csv'))
         if a.ftp_smoke and hbc.get_file(address,remote)!=data: raise RuntimeError('FTP exit replaced old destination')
         print('Returned to HBC:',version,flush=True)
     else:
@@ -465,6 +472,20 @@ try:
     with (profile/'probes.csv').open(newline='') as stream:
         rows=list(csv.DictReader(stream))
     if not rows: raise RuntimeError('No probe records')
+    if (profile/'memory-probes.csv').exists():
+        with (profile/'memory-probes.csv').open(newline='') as stream:
+            memory_rows=list(csv.DictReader(stream))
+        last_memory={}
+        for row in memory_rows:
+            if None in row or any(value is None for value in row.values()):
+                raise RuntimeError('Incomplete memory probe record')
+            if row['kind']=='owner' and int(row['accounting_errors']):
+                raise RuntimeError('Memory owner accounting mismatch: '+row['owner'])
+            if row['kind']=='owner': last_memory[(row['owner'],row['bank'])]=row
+            if row['kind']=='snapshot' and int(row['integrity_errors']):
+                raise RuntimeError('Memory snapshot heap integrity failed')
+        if a.hardware and any(int(row['live_bytes']) for row in last_memory.values()):
+            raise RuntimeError('Tracked buffers remain live after native teardown')
     for row in rows:
         if None in row or any(value is None for value in row.values()):
             raise RuntimeError('Incomplete probe record')
