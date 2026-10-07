@@ -610,16 +610,29 @@ without sending anything to its agent; `--wait-port 0..3600` sets that bound. Cl
 200 lines, including artifact paths and the final result. Runner regression
 coverage checks emulator and hardware failures plus cleanup failure reporting.
 
-On macOS, `--capture-device DEVICE_ID` additionally builds the native AVFoundation
-helper at stable `build/tools/wii-capture` and records at most one JPEG per second
-for at most 600 seconds during the leased job. Identify devices with
-`build/tools/wii-capture --list`; choose the HDMI dongle, not the built-in camera.
-The current workstation reports UGREEN 15389 (`0x146000002b895389`). Capture
-never records audio, opens a server or runs beyond the job cleanup. Camera
-privacy must already be authorized; unattended jobs fail with a saved log
-instead of opening a permission prompt. Captures live in `build/wii.*/video`. These one-second samples can show a
-stuck screen, but cannot establish that single-frame flicker is absent. The
-helper currently reports camera access as not yet authorized on this workstation.
+On macOS, build the optional helper with `python3 scripts/build-wii-capture.py`.
+It embeds a camera-purpose string and reuses the existing executable when its
+inputs are unchanged; failed rebuilds retain the prior executable. After an
+intentional rebuild, recheck permission with `build/tools/wii-capture --list`.
+Explicit one-time setup is `build/tools/wii-capture --authorize`; this is the
+only mode that requests camera access, and it records nothing. Unattended jobs
+fail with a saved log instead of requesting permission. OS consent is separate
+from permission to run a terminal command.
+
+`--capture-device DEVICE_ID` records `video.mov` plus at most one JPEG per second
+inside the shared queue lease. Recording is bounded to 600 seconds and 512 MiB;
+SIGTERM finalizes the movie before exit, with a bounded cleanup deadline. Failure
+to record/finalize fails the runner after restoring SD files. Choose the HDMI
+dongle from `--list`, not the built-in camera. The workstation reports UGREEN
+15389 (`0x146000002b895389`). No audio, listener or persistent process is created.
+Captures live in ignored `build/wii.*/video`. Stills alone cannot rule out brief
+flicker; inspect the full-motion movie. The helper is ad-hoc signed with its explicit identifier; privacy diagnostics
+previously showed invalid code before signing. Camera access now reports
+authorized. Frozen Dolphin profile `build/dolphin.LvXpr6` passed first, followed
+by shared Wii queue job `20261007-022844-4b731b`: all seven media groups, controls
+and HBC return passed, and HDMI recording finalized with 76 screenshots and a
+100 MiB movie in `build/wii.yaq7wbrq/video`. A successful recording is not proof
+that brief flicker is absent; full-movie inspection remains required.
 
 Host FTP regressions bind control/data and occupied-port fixtures to loopback.
 They need no LAN listener or persistent firewall exception. Native debug stdout

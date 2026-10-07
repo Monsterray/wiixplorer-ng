@@ -550,10 +550,13 @@ try:
     (profile/'hbc-smoke.json').write_text(json.dumps(result,indent=2))
     print('Agent overlay, settings/diagnostics buttons, file roundtrip and exit passed',flush=True)
 finally:
+    capture_error=None
     if capture_process:
-        capture_process.terminate()
-        try: capture_process.wait(timeout=5)
-        except subprocess.TimeoutExpired: capture_process.kill();capture_process.wait(timeout=5)
+        if capture_process.poll() is None: capture_process.terminate()
+        try: capture_process.wait(timeout=10)
+        except subprocess.TimeoutExpired: capture_process.kill();capture_process.wait(timeout=10)
+    if capture_process and capture_process.returncode!=0:
+        capture_error="HDMI recording failed or did not finalize; see capture.log"
     if capture_log: capture_log.close()
     if log_server: log_server.close()
     if ftp_data: ftp_data.close()
@@ -617,3 +620,10 @@ finally:
         print('Original SD configuration/probe files restored',flush=True)
         if archive_cleanup_errors:
             raise RuntimeError('Settings restored; owned archive fixtures have retained leftovers: '+ '; '.join(archive_cleanup_errors))
+
+    if capture_error and sys.exc_info()[0] is None:
+        report=profile/'hbc-smoke.json'
+        result=json.loads(report.read_text()) if report.exists() else {}
+        result.update(passed=False,capture_error=capture_error)
+        report.write_text(json.dumps(result,indent=2)+'\n')
+        raise RuntimeError(capture_error)

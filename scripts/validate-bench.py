@@ -55,10 +55,7 @@ def main():
             capture = []
             if args.capture_device:
                 if sys.platform != 'darwin': parser.error('Native capture helper requires macOS')
-                (ROOT/'build/tools').mkdir(exist_ok=True)
-                step('capture-build', ['clang','-fobjc-arc','-framework','Foundation',
-                    '-framework','AVFoundation','-framework','CoreImage','-framework','CoreMedia',
-                    '-framework','AppKit','scripts/wii-capture.m','-o','build/tools/wii-capture'])
+                step('capture-build', [sys.executable,'scripts/build-wii-capture.py'])
                 capture = ['--capture-device', args.capture_device]
             result = step('queue', [sys.executable, str(args.queue_client), 'add',
                 '--name', 'wiixplorer-'+args.bench, '--agent', 'wiixplorer-ng',

@@ -160,6 +160,19 @@ def generate(root):
         result=subprocess.run(args,env=env,capture_output=True,text=True)
         assert result.returncode==int(failure),result.stdout+result.stderr
         assert 'SD originals restored' in result.stdout,result.stdout+result.stderr
+    helper=root/'build/tools/wii-capture';helper.parent.mkdir()
+    helper.write_text("#!/usr/bin/env python3\nimport os,signal,sys,time\nsignal.signal(signal.SIGTERM,lambda *args:sys.exit(int(os.environ.get('FAIL_CAPTURE_CLOSE','0'))))\nwhile True:time.sleep(1)\n")
+    helper.chmod(0o755)
+    for failed_close in (False,True):
+        env=dict(os.environ,WII_BENCH_JOB_START='1',WII_BENCH_IP='lease-only-test',FAIL_CAPTURE_CLOSE=str(int(failed_close)))
+        result=subprocess.run(['python3',str(root/'scripts/hbc-smoke.py'),'--hardware','--capture-device','fixture'],env=env,capture_output=True,text=True)
+        assert result.returncode==int(failed_close),result.stdout+result.stderr
+        assert 'SD originals restored' in result.stdout,result.stdout+result.stderr
+        if failed_close:
+            assert 'HDMI recording failed' in result.stderr,result.stderr
+            prefix='HBC smoke artifacts: '
+            profile=Path(next(line[len(prefix):] for line in result.stdout.splitlines() if line.startswith(prefix)))
+            assert not json.loads((profile/'hbc-smoke.json').read_text())['passed']
     env=dict(os.environ,WII_BENCH_JOB_START='1',WII_BENCH_IP='lease-only-test',MEMORY_TEST='1',MEMORY_DUPLICATE='1')
     result=subprocess.run(['python3',str(root/'scripts/hbc-smoke.py'),'--hardware','--memory-bench'],env=env,capture_output=True,text=True)
     assert result.returncode==1 and 'missing/duplicate alias' in result.stderr,result.stdout+result.stderr
