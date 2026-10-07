@@ -2,8 +2,9 @@
 
 Status: allocator correctness implemented in v0.1.8; initial explicit-owner
 accounting implemented in v0.1.9 and extended to static GUI textures and
-DirList path strings in v0.1.10. Decoder/container accounting and placement
-stages remain planned. The original sequence is based
+DirList path strings in v0.1.10. Decoder/container safety and accounting are implemented in the current work;
+copy, PDF texture and movie frame placement have passed independently on Wii. Remaining
+placement and device/concurrent-workload experiments stay gated on native measurements. The original sequence is based
 on the v0.1.6 source audit and measurements in [MEMORY.md](MEMORY.md).
 
 ### Implemented foundation (v0.1.8)
@@ -241,6 +242,95 @@ regressions where possible and target checks for 32-bit address behavior.
 Gate: host sanitizers, debug/release builds, Dolphin allocation-failure and
 exit checks pass. No placement experiment depends on an unsafe allocator.
 
+## Current media/resource implementation
+
+Production GIF, TPL, JPEG/THP/MTH, audio-ring/resampler, PDF, glyph and browser
+paths now check dimensions, lengths and allocation results before publication.
+Movie queues synchronize publication and shutdown, join both workers before
+release, and fence GX before referenced frame storage is reused/freed. PDF
+starts its worker after derived state/semaphore initialization and joins it
+before release. PDF publication now occurs on the rendering thread. Image
+publication uses an atomic pending slot; cancellation releases a blocked
+publication and shutdown joins before GUI teardown. Worker completion is
+reported to the main thread, which advances the closing fade and queues exactly
+one deletion. Failed browser batches retain the previous listing. Reloads
+release old owned data and reset invalid state.
+
+Limits are tied to representation, GX or existing settings: GX dimensions are
+1–1024, GIF/TPL metadata at most 4,096 entries, and GIF aggregate residency at
+most 16 MiB or half the available allocator-free bytes, whichever is smaller.
+GIF replacement peaks include workspace and old/new vector capacity. Unsupported
+indexed TPL textures fail because this GUI path has no TLUT setup. JPEG/THP/MTH
+packet lengths and decoded pitches are checked; malformed/truncated JPEGs fail
+instead of publishing partial output. Audio keeps its existing 512 KiB settings
+allowance, with checked ring/resampler capacity and bounded empty-loop rewinds.
+PDF budgets pixmap plus texture; movie budgets the complete audio/frame queue
+before accepting dimensions. These snapshots are conservative admission checks,
+not reservations against unrelated concurrent owners; allocation failure remains
+checked at publication. No global heap-routing policy changed.
+
+The 24 owner counters include GIF workspace/frames, movie RGB/input/frames and
+joined stacks, audio ring/resampler/stack, font input and glyph textures, PDF
+pixmap/texture, archive input/scratch and primary browser metadata/path strings.
+Historical CSV names `font_input` and `directory_path` now cover these respective
+aggregate owners. They measure requested capacities, not every library
+allocation. Fixed diagnostic storage is **4,637 bytes** on Wii, excluding code,
+strings/alignment and temporary stdio/stack use. Event batches reserve space
+within the 64 KiB report bound; no idle heap scan or additional diagnostic worker
+is introduced. Release contains no probe or media-benchmark symbols.
+
+Native queued media runs `20261006-083119-a48a5f` and
+`20261006-084132-04685e` passed reload/parser/ring/stride fixtures, PDF raster
+and joined tiny-JPEG movie lifetimes. All owners ended at zero, with no heap or
+accounting errors. Observed requested MEM1 peaks included PDF texture 969,408,
+PDF pixmap 1,938,816, audio replacement ring 524,288 and movie stacks 49,152
+bytes. Joined stack observations were audio 616 and movie aggregate 16,528
+bytes; these are fixture high-water observations, **not codec worst cases or
+permission to shrink stacks**. Font glyphs peaked at 10,496 bytes. These runs
+are not a complete concurrent-workload census.
+
+The strengthened Dolphin profile `build/dolphin.SJDfS5` passed seven groups,
+including 320×240 MTH workers and actual red/white EFB pixel checks, HOME,
+roundtrip and guest/core teardown. EFB checks run before CopyDisp clears the
+buffer, and Dolphin explicitly enables CPU EFB access. Native comparisons use
+this frozen baseline and the subsequent explicit-MEM2 PDF texture build.
+Native baseline queue job `20261006-212913-35d8dc` and explicit-MEM2 PDF job
+`20261006-213042-b8e0f6` passed all seven groups, GPU colors, controls and exit.
+PDF texture requested 969,408 bytes moved from MEM1 to MEM2; the pixmap remained
+1,938,816 bytes in MEM1. Three PDF opens/renders took 1,944,716 versus 1,958,290
+microseconds in these runs, including frame waits; no speed gain is claimed.
+All owners ended at zero. The subsequent publication/close fix passed frozen Dolphin profile
+`build/dolphin.HNgdUs` and queue job `20261006-214435-9b4b17` (65 seconds),
+including the real PDF back-button/fade/delete path. All owners ended at zero;
+this evidence is separate from the earlier placement timing comparison.
+Movie frame storage now uses cached MEM2 with matching frees on resize/failure/
+shutdown. Frozen Dolphin profile `build/dolphin.8H56Bc` and queued Wii job
+`20261006-222543-776688` passed all seven media groups, including observation of
+both red and white MTH frames, PDF close/fade/delete, HOME, roundtrip and exit.
+A previous native movie placement run observed 460,800 requested MEM2 frame
+bytes and zero live bytes at exit. Queue depth is asynchronous; its peak cannot
+be used as a before/after timing comparison. No stack or audio placement changed.
+
+Compressed memory-open U8/RARC parsing now reads the internally owned input
+directly instead of making another compressed-input copy. Borrowed public input
+is still copied into owned storage; disk parsing retains checked scratch I/O.
+Decoder input sizes are explicitly rejected above UINT32_MAX, matching their
+APIs. Sanitized production parser tests pass; native archive validation of this
+delta passed frozen Dolphin profile `build/dolphin.pia9ur`, then shared Wii
+queue job `20261006-223025-3112e4` (78 seconds): all 30 codec/parser, CRC,
+traversal and preservation cases, controls and exit passed.
+
+HDMI capture is optional and must occur within the shared Wii queue lease.
+
+Copy I/O now uses explicit cached MEM2 with matching free and same-bank OOM
+size fallback. The default remains 128 KiB. Native job
+`20261006-084332-2f4915` passed 15 verified 8 MiB copies and exit; median 128 KiB
+copy rate was 2.038 versus the prior 2.069 MiB/s. Three samples do not establish
+a speed improvement; the benefit is removing that transient request from MEM1.
+Both runs restored the 51,380,000-byte MEM2 free baseline and 28,311,360-byte
+largest block. Retain cached pointers, current audio/stack/FIFO placement and LC
+off until whole-workload evidence supports further changes.
+
 ## 2. Account for memory by owner and lifetime
 
 Extend existing grouped probes, without a new allocation-tracking framework.
@@ -278,8 +368,8 @@ and after. Keep the global allocation preference unchanged initially.
 | XFBs and HOME overlay, `video.cpp` | Two mode-sized XFBs, one temporary overlay | Keep in MEM1, VI requires it; track peak and handle failure |
 | GX FIFO, `video.cpp` | 256 KiB static | Keep placement/size until GPU evidence supports a change |
 | Image/GIF/PDF textures, `gui_imagedata.cpp`, image converters, `PDFViewer.cpp` | Often width × height × format, sometimes decoded and converted copies | Candidate for cached MEM2; validate GX accessibility, lifetimes and flushes |
-| Movie frames, `WiiMovie.cpp` | Up to eight width × height × 2-byte frames | Cached MEM2 candidate; bound combined frame/audio/decoder peak |
-| File copy, `fileops.cpp` | Default 128 KiB, current maximum 256 KiB | Cached MEM2 candidate; keep measured 128 KiB default |
+| Movie frames, `WiiMovie.cpp` | Up to eight width × height × 2-byte frames | Cached MEM2 implemented; bounded queue, joined owners and changing-color GPU fixture passed |
+| File copy, `fileops.cpp` | Default 128 KiB, current maximum 256 KiB | Cached MEM2 implemented with same-bank OOM size fallback; retain 128 KiB default |
 | ZIP/RAR I/O, `ZipFile.cpp`, `RarFile.cpp` | ZIP 50/70 KiB paths; RAR 64 KiB store buffer | Cached MEM2, reused within an operation |
 | 7z/U8/RARC, archive sources | Solid decoded blocks or compressed + decoded images | Cached MEM2, explicit aggregate/contiguous budgets before allocation |
 | FTP, `FTPServer.cpp`, `FtpsrvConfig.h` | 32 KiB worker stack; four sessions; one shared 32 KiB core transfer buffer plus session state | Allocate only when enabled; measure full core size and reclaim on disable |
@@ -288,9 +378,9 @@ and after. Keep the global allocation preference unchanged initially.
 
 Do not create a blanket fallback that lets bulk owners consume required MEM1
 headroom. Prefer a clear, recoverable OOM result when the selected bank cannot
-honor an owner's budget. Audit movie dimension changes and allocation failure
-before moving its buffers: current frame conversion follows an unchecked
-allocation, and frame reallocation is triggered by width changes alone.
+honor an owner's budget. Movie dimension changes and allocation failures are now checked before
+conversion; both width and height trigger replacement. Preserve these guards
+and complete combined-load validation before expanding placement changes.
 
 Gate: peak MEM1 pressure improves, MEM2 stays bounded, no flicker, underrun,
 stale texture, corrupted output, crash or exit regression. Disabled FTP retains
@@ -344,6 +434,16 @@ warm reuse, conflicting strides, real copy/CRC/texture conversion, and active
 audio/GPU/FTP combinations. Compare median and tail latency, bytes copied,
 peak/contiguous memory and correctness. Keep a change only when the real
 workload improves without compromising resources or compatibility.
+
+The initial working-set sweep is implemented and passed frozen Dolphin profile
+`build/dolphin.ydRE5T` then shared Wii queue job `20261006-222753-72b0dd`.
+It adds 768 verified copy/CRC and conflicting-stride rows spanning 8 KiB–1 MiB,
+with cold/reused cases and complete timed CPU cache maintenance. Data changes
+per copy row, and fault-injected host coverage rejects stale output. See
+[MEMORY.md](MEMORY.md) for the native medians and interpretation. CPU results
+support retaining cached bulk ownership; they do not validate device handoffs.
+Concurrent media/transfer headroom, native FTP passive timeout, further archive
+bank placement and true GPU/audio K1/LC comparisons are still open gates.
 
 ## Delivery and validation
 

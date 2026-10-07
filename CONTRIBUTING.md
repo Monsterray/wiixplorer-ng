@@ -21,7 +21,10 @@ git status --short
 ```
 
 Use a host compiler for `make check`; override `HOST_CC`/`HOST_CXX` when
-needed (for example `make check HOST_CC=clang HOST_CXX=clang++`). Explain the problem, resulting behavior, and checks
+needed. Media regression tests also require host `pkg-config` and libjpeg
+development files (`libjpeg-dev` on Debian/Ubuntu, `jpeg-turbo` on Homebrew).
+Override `HOST_PKG_CONFIG` for a nondefault host installation.
+For example, use `make check HOST_CC=clang HOST_CXX=clang++`. Explain the problem, resulting behavior, and checks
 performed in the pull request. Report runtime checks separately from compilation.
 For filesystem changes, include error, cancellation, and existing-destination
 cases, using disposable fixtures. Follow [DEBUGGING.md](DEBUGGING.md) for Dolphin

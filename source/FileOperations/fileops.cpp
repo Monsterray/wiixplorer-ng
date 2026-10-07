@@ -1,5 +1,6 @@
 #include "Diagnostics/MemoryProbes.h"
 #include "TransferFile.h"
+#include "Memory/mem2.h"
 #include "Diagnostics/Probes.h"
 /****************************************************************************
  * Copyright (C) 2009-2011 Dimok
@@ -378,9 +379,9 @@ int CopyFile(const char * src, const char * dest, u32 bufferSize)
 
 	u32 blksize = bufferSize;
 
-	u8 * buffer = (u8 *) memalign(32, blksize);
+	u8 * buffer = (u8 *) MEM2_alloc(blksize);
 	while (!buffer && blksize > 32*1024) {
-		blksize /= 2; buffer = (u8 *)memalign(32, blksize);
+		blksize /= 2; buffer = (u8 *)MEM2_alloc(blksize);
 	}
 	WX_MEMORY_BUFFER(IO, WX_MEM_COPY, buffer, blksize);
 
@@ -392,14 +393,14 @@ int CopyFile(const char * src, const char * dest, u32 bufferSize)
 
 	wx_transfer_file transfer;
 	if (wx_transfer_begin(&transfer, dest) != 0) {
-		free(buffer); fclose(source); return -3;
+		MEM2_free(buffer); fclose(source); return -3;
 	}
 	FILE * destination = fopen(transfer.staged, "wb");
 
 	if(destination == NULL)
 	{
 		wx_transfer_abort(&transfer);
-		free(buffer);
+		MEM2_free(buffer);
 		fclose(source);
 		return -3;
 	}
@@ -433,7 +434,7 @@ int CopyFile(const char * src, const char * dest, u32 bufferSize)
 	int sourceError = ferror(source);
 	if (done == sizesrc && fgetc(source) != EOF) sourceError = 1;
 	if (ferror(source)) sourceError = 1;
-	free(buffer);
+	MEM2_free(buffer);
 	if (fclose(source) != 0) sourceError = 1;
 	int closeResult = fclose(destination);
 

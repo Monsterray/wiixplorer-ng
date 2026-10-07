@@ -46,7 +46,8 @@ bool CheckFile(const char *p) { return access(p, F_OK) == 0; }
 bool CompareDevices(const char *, const char *) { return sameDevice; }
 bool RemoveFile(const char *p) { return remove(p) == 0; }
 bool RenameFile(const char *s, const char *d) { return rename(s, d) == 0; }
-void *memalign(size_t, size_t n) { return malloc(n); }
+void *MEM2_alloc(unsigned n) { return malloc(n); }
+void MEM2_free(void *p) { free(p); }
 int closeFile(FILE *f) { int result = fclose(f); return failClose ? EOF : result; }
 #define fclose closeFile
 '''

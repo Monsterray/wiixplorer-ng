@@ -76,6 +76,7 @@ int main(int argc UNUSED, char *argv[] UNUSED)
 	Application::Instance()->show();
 #if WX_DEBUG_BUILD
     DebugBenchFile(bench,"sd:/apps/WiiXplorer/bench.cfg");
+    if(bench.paths[BenchMedia][0]) RunMediaValidation(bench.paths[BenchMedia]);
     if(bench.paths[BenchMemory][0]) RunMemoryBenchmark(bench.paths[BenchMemory]);
     if(bench.paths[BenchArchive][0]) RunArchiveValidation(bench.paths[BenchArchive],bench.paths[BenchArchiveOutput][0] ? bench.paths[BenchArchiveOutput] : NULL);
     Application::Instance()->SetSmokeFrames(SmokeFrames(argc, argv));

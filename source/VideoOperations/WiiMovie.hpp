@@ -21,6 +21,7 @@
 #include "Tools/BufferCircle.hpp"
 #include "Controls/CMutex.h"
 #include "gcvid.h"
+#include <atomic>
 
 #define SND_BUFFERS	 8
 #define FRAME_BUFFERS	 8
@@ -49,8 +50,10 @@ class WiiMovie : public GuiElement, public sigslot::has_slots<>
 
 		lwp_t ReadThread, DecThread;
 		u8 *ReadStackBuf, *DecStackBuf;
-		CMutex readDecodeMutex;
-		bool bDecoding;
+		CMutex readDecodeMutex, frameMutex;
+		std::vector<u8> EncodedFrame;
+		u32 FrameBytes;
+		std::atomic<bool> workersReady, decodeFailed;
 
 		VideoFile * Video;
 		VideoFrame VideoF;
@@ -59,9 +62,8 @@ class WiiMovie : public GuiElement, public sigslot::has_slots<>
 		Timer PlayTime;
 		float currentFrame;
 		u8 *FrameBuf[FRAME_BUFFERS];
-		int FrameBufCount;
-		bool Playing;
-		bool ExitRequested;
+		std::atomic<int> FrameBufCount;
+		std::atomic<bool> Playing, ExitRequested;
 		u16 whichLoad;
 		int maxSoundSize;
 		int SndChannels;

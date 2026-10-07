@@ -2,6 +2,8 @@
 .DEFAULT_GOAL := all
 DEVKITPRO ?= /opt/devkitpro
 DEVKITPPC ?= $(DEVKITPRO)/devkitPPC
+# Capture the host tool before wii_rules prepends the cross-toolchain PATH.
+HOST_PKG_CONFIG := $(shell command -v pkg-config)
 include $(DEVKITPPC)/wii_rules
 
 FTP_BACKEND ?= ftpsrv
@@ -101,8 +103,20 @@ $(OUTPUT).dol: $(OUTPUT).elf
 debug release:
 	$(MAKE) CONFIG=$@ all
 check:
+	CXX="$(HOST_CXX)" python3 tests/tpl_bounds.py
+	CXX="$(HOST_CXX)" python3 tests/gif_bounds.py
+	CXX="$(HOST_CXX)" python3 tests/audio_ring.py
+	CXX="$(HOST_CXX)" python3 tests/audio_decode.py
+	CXX="$(HOST_CXX)" python3 tests/movie_frames.py
+	CXX="$(HOST_CXX)" python3 tests/texture_stride.py
+	CXX="$(HOST_CXX)" PKG_CONFIG="$(HOST_PKG_CONFIG)" python3 tests/video_codec.py
+	CXX="$(HOST_CXX)" python3 tests/font_glyph.py
+	CXX="$(HOST_CXX)" python3 tests/pdf_raster.py
+	CXX="$(HOST_CXX)" python3 tests/font_io.py
 	CXX="$(HOST_CXX)" python3 tests/image_lifetime.py
+	CXX="$(HOST_CXX)" python3 tests/image_publication.py
 	CXX="$(HOST_CXX)" python3 tests/directory_lifetime.py
+	CXX="$(HOST_CXX)" python3 tests/browser_storage.py
 	CXX="$(HOST_CXX)" python3 tests/network_receive.py
 	CXX="$(HOST_CXX)" python3 tests/memory_probes.py
 	CXX="$(HOST_CXX)" python3 tests/memory_allocator.py
@@ -115,6 +129,7 @@ check:
 	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/regression.py
 	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/stability.py
 	python3 tests/dolphin_process.py
+	python3 tests/validate_bench.py
 	python3 tests/dolphin_smoke.py
 	CXX="$(HOST_CXX)" python3 tests/debug_launch.py
 	CXX="$(HOST_CXX)" python3 tests/probes.py

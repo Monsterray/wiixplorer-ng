@@ -25,6 +25,8 @@
  ***************************************************************************/
 #include <unistd.h>
 #include <malloc.h>
+#include <string.h>
+#include "Diagnostics/MemoryProbes.h"
 #include "SoundHandler.hpp"
 #include "Mp3Decoder.hpp"
 #include "OggDecoder.hpp"
@@ -44,10 +46,19 @@ SoundHandler::SoundHandler() : decoderMutex(true)
 		DecoderList[i] = NULL;
 
 	ThreadStack = (u8 *) memalign(32, 32768);
+	WX_MEMORY_ALLOC(THREADS,WX_MEM_AUDIO_STACK,ThreadStack,32768);
 	if(!ThreadStack)
 		return;
 
-	LWP_CreateThread(&SoundThread, UpdateThread, this, ThreadStack, 32768, 100);
+#if WX_PROBE_THREADS && WX_PROBE_LEVEL>=2
+    memset(ThreadStack,0xa5,32768);
+#endif
+	if(LWP_CreateThread(&SoundThread, UpdateThread, this, ThreadStack, 32768, 100)<0) {
+		SoundThread=LWP_THREAD_NULL;
+		WX_MEMORY_FREE(THREADS,WX_MEM_AUDIO_STACK,ThreadStack,32768);
+		free(ThreadStack);
+		ThreadStack=NULL;
+	}
 }
 
 SoundHandler::~SoundHandler()
@@ -57,8 +68,9 @@ SoundHandler::~SoundHandler()
 	if (SoundThread != LWP_THREAD_NULL) LWP_JoinThread(SoundThread, NULL);
 	LWP_SemDestroy(ThreadWake);
 	SoundThread = LWP_THREAD_NULL;
-	if(ThreadStack)
-		free(ThreadStack);
+	WX_MEMORY_STACK(WX_MEM_AUDIO_STACK,ThreadStack,32768);
+	WX_MEMORY_FREE(THREADS,WX_MEM_AUDIO_STACK,ThreadStack,32768);
+	free(ThreadStack);
 
 	ClearDecoderList();
 }

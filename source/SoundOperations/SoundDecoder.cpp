@@ -18,6 +18,7 @@
 #include <malloc.h>
 #include <string.h>
 #include <unistd.h>
+#include "Diagnostics/MemoryProbes.h"
 #include "SoundDecoder.hpp"
 
 static const u32 FixedPointShift = 15;
@@ -51,8 +52,8 @@ SoundDecoder::~SoundDecoder()
 		delete file_fd;
 	file_fd = NULL;
 
-	if(ResampleBuffer)
-		free(ResampleBuffer);
+	WX_MEMORY_FREE(CPU,WX_MEM_AUDIO_RESAMPLE,ResampleBuffer,SoundBuffer.Capacity());
+	free(ResampleBuffer);
 }
 
 void SoundDecoder::Init()
@@ -67,8 +68,13 @@ void SoundDecoder::Init()
 	EndOfFile = false;
 	Decoding = false;
 	ExitRequested = false;
-	SoundBuffer.SetBufferBlockSize(SoundBlockSize);
-	SoundBuffer.Resize(SoundBlocks);
+    // Match the existing settings UI's 512 KiB ring allowance. Invalid file
+    // settings fail closed instead of wrapping a signed count or multiplying.
+    int blocks=Settings.SoundblockCount;
+    if(blocks<3 || SoundBlockSize<4096 || SoundBlockSize>65535 ||
+       blocks>512*1024/SoundBlockSize || !SoundBuffer.SetBufferBlockSize(SoundBlockSize) || !SoundBuffer.Resize(blocks)) {
+        ExitRequested=true;EndOfFile=true;
+    }
 	ResampleBuffer = NULL;
 	ResampleRatio = 0;
 }
@@ -97,12 +103,14 @@ void SoundDecoder::EnableUpsample(void)
 	   && SampleRate != 32000
 	   && SampleRate != 48000)
 	{
-		ResampleBuffer = (u8*)memalign(32, SoundBlockSize);
-		ResampleRatio =  ( FixedPointScale * SampleRate ) / 48000;
-		SoundBlockSize = ( SoundBlockSize * ResampleRatio ) / FixedPointScale;
-		SoundBlockSize &= ~0x03;
-		// set new sample rate
-		SampleRate = 48000;
+        if(SampleRate<=0 || SampleRate>48000) { ExitRequested=true;return; }
+        u32 ratio=(u64)FixedPointScale*SampleRate/48000;
+        int block=((u64)SoundBlockSize*ratio/FixedPointScale)&~3;
+        if(!ratio || block<4) { ExitRequested=true;return; }
+        ResampleBuffer=(u8*)memalign(32,SoundBuffer.Capacity());
+        WX_MEMORY_ALLOC(CPU,WX_MEM_AUDIO_RESAMPLE,ResampleBuffer,SoundBuffer.Capacity());
+        if(!ResampleBuffer) { ExitRequested=true;return; }
+        ResampleRatio=ratio;SoundBlockSize=block;SampleRate=48000;
 	}
 }
 
@@ -148,6 +156,7 @@ void SoundDecoder::Decode()
 	Decoding = true;
 
 	int done  = 0;
+    bool rewoundWithoutProgress=false;
 	u8 * write_buf = SoundBuffer.GetBuffer(whichLoad);
 	if(!write_buf)
 	{
@@ -158,6 +167,7 @@ void SoundDecoder::Decode()
 
 	if(ResampleTo48kHz && !ResampleBuffer)
 		EnableUpsample();
+    if(ExitRequested) { Decoding=false;return; }
 
 	while(done < SoundBlockSize)
 	{
@@ -165,8 +175,9 @@ void SoundDecoder::Decode()
 
 		if(ret <= 0)
 		{
-			if(Loop)
+			if(Loop && ret==0 && !rewoundWithoutProgress)
 			{
+                rewoundWithoutProgress=true;
 				Rewind();
 				continue;
 			}
@@ -177,6 +188,8 @@ void SoundDecoder::Decode()
 			}
 		}
 
+        if(ret>SoundBlockSize-done) { ExitRequested=true;Decoding=false;return; }
+        rewoundWithoutProgress=false;
 		done += ret;
 	}
 
@@ -185,10 +198,12 @@ void SoundDecoder::Decode()
 		// check if we need to resample
 		if(ResampleBuffer && ResampleRatio)
 		{
+			done &= ~3;
 			memcpy(ResampleBuffer, write_buf, done);
 
 			int src_samples = done >> 1;
-			int dest_samples = ( src_samples * FixedPointScale ) / ResampleRatio;
+			int dest_samples=(u64)src_samples*FixedPointScale/ResampleRatio;
+			if(!src_samples || (u32)dest_samples>SoundBuffer.Capacity()/2) { ExitRequested=true;Decoding=false;return; }
 			dest_samples &= ~0x01;
 			Upsample((s16*)ResampleBuffer, (s16*)write_buf, src_samples, dest_samples);
 			done = dest_samples << 1;

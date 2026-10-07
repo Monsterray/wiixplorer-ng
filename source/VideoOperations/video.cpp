@@ -1,5 +1,6 @@
 #include "Diagnostics/MemoryProbes.h"
 #include "Diagnostics/Probes.h"
+#include "Diagnostics/TransferBench.h"
 /***************************************************************************
  * Copyright (C) 2009
  * by Tantric
@@ -203,6 +204,9 @@ void Menu_Render()
 	whichfb ^= 1; // flip framebuffer
 	GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
 	GX_SetColorUpdate(GX_TRUE);
+#if WX_DEBUG_BUILD
+    MediaCapturePixel(); // Explicit media bench only; EFB is cleared by CopyDisp.
+#endif
 	GX_CopyDisp(xfb[whichfb],GX_TRUE);
 	GX_DrawDone();
 	} // Exclude VSync and diagnostic file writes from GPU completion timing.

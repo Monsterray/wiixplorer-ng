@@ -187,7 +187,7 @@ class VideoFrame
   VideoFrame();
   ~VideoFrame();
 
-  void resize(int width, int height);
+  bool resize(int width, int height);
 
   int getWidth() const { return _w; };
   int getHeight() const { return _h; };
@@ -217,6 +217,7 @@ class VideoFile
  public:
   VideoFile(FILE* f);
   virtual ~VideoFile();
+  bool valid() const { return _valid; }
 
 
   virtual int getWidth() const { return 0; };
@@ -241,6 +242,9 @@ class VideoFile
  protected:
 
   FILE* _f;
+  bool _valid;
+  u64 _fileSize;
+  size_t _budget;
   std::vector<u8> _decodeBuffer;
 
   //void loadFrame(long offset, int size);
@@ -285,8 +289,8 @@ class ThpVideoFile : public VideoFile
   int _numInts;
 
   int _currFrameNr;
-  int _nextFrameOffset;
-  int _nextFrameSize;
+  u64 _nextFrameOffset;
+  u32 _nextFrameSize;
   std::vector<u8> _currFrameData;
 };
 
@@ -312,9 +316,9 @@ class MthVideoFile : public VideoFile
   MthHeader _head;
 
   int _currFrameNr;
-  int _nextFrameOffset;
-  int _nextFrameSize;
-  int _thisFrameSize;
+  u64 _nextFrameOffset;
+  u32 _nextFrameSize;
+  u32 _thisFrameSize;
   std::vector<u8> _currFrameData;
 };
 

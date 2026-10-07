@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
+#include "Diagnostics/MemoryProbes.h"
 
 #include "Prompts/PromptWindows.h"
 #include "FileOperations/fileops.h"
@@ -51,12 +52,20 @@ bool RarcFile::ParseFile()
     if(ReadFile(header,16,0)!=16) return false;
     if(!memcmp(header,"Yaz0",4)) {
         u32 size=wx_archive_be32(header+4);
-        if(!size || FileSize>SIZE_MAX || FileSize+size>wx_archive_memory_budget()) { CloseFile(); return false; }
+        if(!size || FileSize>UINT32_MAX || FileSize+size>wx_archive_memory_budget()) { CloseFile(); return false; }
         u32 input=(u32)FileSize;
-        u8 *compressed=(u8*)malloc(input),*decoded=(u8*)malloc(size);
-        bool okay=compressed && decoded && ReadFile(compressed,input,0)==input && uncompressYaz0(compressed,input,decoded,size);
-        free(compressed); CloseFile();
-        if(!okay) { free(decoded); return false; }
+        const bool scratch=!FromMem;
+        u8 *compressed=scratch ? (u8*)malloc(input) : FileBuffer;
+        u8 *decoded=(u8*)malloc(size);
+        if(scratch) WX_MEMORY_ALLOC(IO,WX_MEM_ARCHIVE_SCRATCH,compressed,input);
+        WX_MEMORY_ALLOC(IO,WX_MEM_ARCHIVE_BUFFER,decoded,size);
+        bool okay=compressed && decoded && (!scratch || ReadFile(compressed,input,0)==input) && uncompressYaz0(compressed,input,decoded,size);
+        if(scratch) {
+            WX_MEMORY_FREE(IO,WX_MEM_ARCHIVE_SCRATCH,compressed,input);
+            free(compressed);
+        }
+        CloseFile();
+        if(!okay) { WX_MEMORY_FREE(IO,WX_MEM_ARCHIVE_BUFFER,decoded,size);free(decoded);return false; }
         FileBuffer=decoded; FileSize=size; FromMem=true;
     }
     if(!ParseRarcHeader()) { CloseFile(); return false; }

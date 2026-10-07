@@ -1,3 +1,4 @@
+#include <new>
 /****************************************************************************
  * Copyright (C) 2009 r-win
  * Copyright (C) 2009 - 2012 Dimok
@@ -25,7 +26,7 @@
 #include "sys.h"
 #include "input.h"
 
-ImageViewer::ImageViewer(const char *filepath)
+ImageViewer::ImageViewer(const char *filepath, bool startWorker)
 	: GuiFrame(0, 0)
 	, CThread(75, 32768)
 {
@@ -40,7 +41,7 @@ ImageViewer::ImageViewer(const char *filepath)
 	buttonAlpha = 255;
 	updateAlpha = false;
 	isPointerVisible = true;
-	bExitRequested = false;
+	bExitRequested = false;workerFinished=getThread()==LWP_THREAD_NULL;deleteQueued=false;
 	bSlideShowFadeStart = false;
 
 	for (int i = 0; i < 4; i++)
@@ -53,7 +54,7 @@ ImageViewer::ImageViewer(const char *filepath)
 
 	SetEffect(EFFECT_FADE, 50);
 
-	startThread();
+	if(startWorker) startThread();
 
 	if(filepath)
 	{
@@ -64,12 +65,18 @@ ImageViewer::ImageViewer(const char *filepath)
 
 ImageViewer::~ImageViewer()
 {
+    bExitRequested=true;
+    shutdownThread(); // Join before derived GUI state and pending images disappear.
+    GX_DrawDone();
+    delete newImageData.exchange(NULL);
 	RemoveAll();
 
 	//! the loading thread is stopped on button click
 	while(!threadTasks.empty())
 	{
-		Taskbar::Instance()->RemoveTask(dynamic_cast<FileLoadTask *>(threadTasks.front()));
+        FileLoadTask *load=dynamic_cast<FileLoadTask *>(threadTasks.front());
+        if(load) Taskbar::Instance()->RemoveTask(load);
+        if(threadTasks.front()==imageDir) imageDir=NULL;
 		delete threadTasks.front();
 		threadTasks.pop();
 	}
@@ -363,22 +370,15 @@ void ImageViewer::executeThread()
 {
 	while(!bExitRequested)
 	{
-		if(!threadTasks.empty())
-		{
-			threadMutex.lock();
-			ThreadedTask *tmpTask = threadTasks.front();
-			threadTasks.pop();
-			threadMutex.unlock();
-			tmpTask->Execute();
-		}
-		else
-		{
-			usleep(100000);
-		}
+        threadMutex.lock();
+        ThreadedTask *task=NULL;
+        if(!threadTasks.empty()) { task=threadTasks.front();threadTasks.pop(); }
+        threadMutex.unlock();
+        if(task) task->Execute();
+        else usleep(100000);
 	}
 
-	SetEffect(EFFECT_FADE, -50);
-	Application::Instance()->PushForDelete(this);
+	workerFinished=true; // The main thread owns GUI state and delete publication.
 }
 
 bool ImageViewer::LoadImageList(const char * filepath)
@@ -452,7 +452,9 @@ bool ImageViewer::LoadImage(int index, bool silent)
 
 void ImageViewer::OnFinishedImageLoad(u8 *buffer, u32 buffer_size)
 {
-	GuiImageData *newImage = new GuiImageData(buffer, buffer_size);
+    GuiImageData *newImage=NULL;
+    try { newImage=new(std::nothrow) GuiImageData(buffer,buffer_size); }
+    catch(const std::bad_alloc &) {}
 
 	if(buffer)
 	{
@@ -460,17 +462,18 @@ void ImageViewer::OnFinishedImageLoad(u8 *buffer, u32 buffer_size)
 		buffer = NULL;
 	}
 
-	if (newImage->GetImage() == NULL)
+	if (!newImage || newImage->GetImage() == NULL)
 	{
 		delete newImage;
 		return;
 	}
 
-	// wait for the image to load up if the pointer is in use otherwise it will leak the pointer
-	while(newImageData != NULL)
-		usleep(1000);
-
-	newImageData = newImage;
+    while(!bExitRequested) {
+        GuiImageData *expected=NULL;
+        if(newImageData.compare_exchange_weak(expected,newImage)) return;
+        usleep(1000);
+    }
+    delete newImage; // Pending publication cannot hold shutdown forever.
 }
 
 void ImageViewer::Setup()
@@ -664,6 +667,14 @@ void ImageViewer::Setup()
 
 void ImageViewer::Draw()
 {
+    if(bExitRequested) {
+        if(workerFinished && !deleteQueued) {
+            deleteQueued=true;SetEffect(EFFECT_FADE,-50);
+            Application::Instance()->PushForDelete(this);
+        }
+        GuiFrame::Draw(); // Keep the closing fade advancing until deletion.
+        return;
+    }
 	if(SlideShowStart > 0)
 	{
 		time_t currentTime = time(0);
@@ -721,7 +732,7 @@ void ImageViewer::Draw()
 		image->SetAngle(currentAngle - (rotateLeft += 3));
 	}
 
-	if(newImageData)
+	if(newImageData.load())
 	{
 		if(!bExitRequested && SlideShowStart > 0 && !bSlideShowFadeStart && !image->IsAnimated())
 		{
@@ -734,13 +745,13 @@ void ImageViewer::Draw()
 			// mark that the effect has finished and image was changed
 			bSlideShowFadeStart = false;
 
-			image->SetImage(newImageData);
+			GuiImageData *pending=newImageData.exchange(NULL);
+            image->SetImage(pending);
 
 			if (imageData != NULL)
 				delete imageData;
 
-			imageData = newImageData;
-			newImageData = NULL;
+			imageData = pending;
 
 			//!Set original size first if not over the limits
 			SetStartUpImageSize();

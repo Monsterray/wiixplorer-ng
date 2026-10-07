@@ -16,8 +16,9 @@ bandwidth measurements.
 
 The results favor compact cached working data and avoiding unnecessary copies.
 Uncached reads were much slower, especially in MEM2; uncached destinations
-performed well for some scalar copies. No production buffer, allocation or
-cache policy has been changed based on these measurements.
+performed well for some scalar copies. The default copy size remains 128 KiB. Explicit copy-buffer placement now uses
+cached MEM2 to reduce MEM1 pressure; no uncached or locked-cache production
+policy has been selected from these scalar measurements.
 
 ## Memory capacity and aliases
 
@@ -209,13 +210,37 @@ Use these findings to prioritize changes, then measure the actual pipeline:
   Benchmark LC only where its transfer/setup costs and reduced normal cache
   are justified by the processing workload.
 
-Future tests should sweep 8, 16, 32, 64, 128 and 256 KiB working sets, then
-512 KiB or larger only when safely allocatable. Separate warm reuse, cold first
-passes and sustained access beyond L2; vary buffer placement to test conflict
-sensitivity. Compare normal cache against LC enabled, and use validated miss
-counters where available. Keep raw kernel timing separate from end-to-end
-cache maintenance, I/O and integrity-verification costs. No production tuning
-is warranted solely from the current scalar kernels.
+### Complete working-set pipelines (v0.1.11)
+
+The reusable runner now adds 768 verified rows: 8, 16, 32, 64, 128, 256,
+512 and 1024 KiB blocks; cached MEM1/MEM2 input; cached/uncached output;
+cold/reused copy-plus-CRC pipelines; and 4/32/512/4096-byte read strides.
+Each row processes 2 MiB, with three repetitions. Four aligned 1 MiB owners
+are temporary and freed before completion. Data changes per copy row so stale
+cached output fails verification. The host regression deliberately replays
+stale output and confirms rejection.
+
+Dolphin profile `build/dolphin.ydRE5T` passed first. Shared queue job
+`20261006-222753-72b0dd` then passed the same frozen DOL on Wii, all 144 original
+and 768 supplementary checks, controls and exit (105 seconds). Raw CSV and
+median/max JSON are in ignored `build/wii.x_6s8jwq`.
+
+Native median MiB/s, including the timed cache maintenance and CRC consumer:
+
+| MEM2 producer/consumer | 8 KiB | 32 KiB | 128 KiB | 256 KiB | 512 KiB | 1 MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Cached output, reused | 201.37 | 165.55 | 143.12 | 50.38 | 39.54 | 39.25 |
+| Uncached output, reused | 65.60 | 65.22 | 61.66 | 40.48 | 40.51 | 40.55 |
+| Cached output, cold | 51.72 | 50.32 | 49.65 | 43.05 | 38.73 | 38.44 |
+
+Reused means no forced per-pass invalidation, not a guaranteed cache hit.
+Stride rows visit every word; at 512 KiB the MEM2 reused read median was
+137.65 MiB/s for sequential words versus 18.68 MiB/s for 4096-byte strides.
+Keep compact, contiguous working sets and cached ownership. These CPU pipelines
+do not prove GPU/audio/device handoff performance. Three samples establish
+neither robust tail latency nor a reason to change production buffer defaults,
+texture aliases, cache policy or LC use. Active audio/GPU/FTP combinations,
+validated cache-miss counters and whole-device K1/LC comparisons remain pending.
 
 ## Reproduce and retain evidence
 

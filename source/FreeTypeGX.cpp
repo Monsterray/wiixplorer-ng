@@ -21,6 +21,8 @@
  */
 
 #include "FreeTypeGX.h"
+#include "Diagnostics/MemoryProbes.h"
+#include <new>
 
 using namespace std;
 
@@ -116,14 +118,17 @@ void FreeTypeGX::setVertexFormat(uint8_t vertexInd)
 void FreeTypeGX::unloadFont()
 {
 	if (this->fontData.size() == 0) return;
+    GX_DrawDone(); // Complete queued glyph reads before releasing textures.
 
 	map<int16_t, map<wchar_t, ftgxCharData> >::iterator itr;
 	map<wchar_t, ftgxCharData>::iterator itr2;
 
 	for (itr = fontData.begin(); itr != fontData.end(); itr++)
 	{
-		for (itr2 = itr->second.begin(); itr2 != itr->second.end(); itr2++)
-			free(itr2->second.glyphDataTexture);
+        for(itr2=itr->second.begin();itr2!=itr->second.end();++itr2) {
+            WX_MEMORY_FREE(GPU,WX_MEM_FONT,itr2->second.glyphDataTexture,(u32)itr2->second.textureWidth*itr2->second.textureHeight/2);
+            free(itr2->second.glyphDataTexture);
+        }
 
 		itr->second.clear();
 	}
@@ -143,13 +148,14 @@ void FreeTypeGX::unloadFont()
  */
 ftgxCharData * FreeTypeGX::cacheGlyphData(wchar_t charCode, int16_t pixelSize)
 {
+    try {
 	map<int16_t, map<wchar_t, ftgxCharData> >::iterator itr = fontData.find(pixelSize);
 	if (itr != fontData.end())
 	{
 		map<wchar_t, ftgxCharData>::iterator itr2 = itr->second.find(charCode);
 		if (itr2 != itr->second.end())
 		{
-			return &itr2->second;
+			return itr2->second.glyphDataTexture ? &itr2->second : NULL;
 		}
 	}
 
@@ -179,6 +185,7 @@ ftgxCharData * FreeTypeGX::cacheGlyphData(wchar_t charCode, int16_t pixelSize)
 		{
 			FT_Bitmap *glyphBitmap = &ftFace->glyph->bitmap;
 
+            if(glyphBitmap->width>1024 || glyphBitmap->rows>1024 || (glyphBitmap->width && glyphBitmap->rows && glyphBitmap->pixel_mode!=FT_PIXEL_MODE_GRAY)) return NULL;
 			textureWidth = ALIGN8(glyphBitmap->width);
 			textureHeight = ALIGN8(glyphBitmap->rows);
 			if(textureWidth == 0)
@@ -198,10 +205,11 @@ ftgxCharData * FreeTypeGX::cacheGlyphData(wchar_t charCode, int16_t pixelSize)
 
 			loadGlyphData(glyphBitmap, &fontData[pixelSize][charCode]);
 
-			return &fontData[pixelSize][charCode];
+			return fontData[pixelSize][charCode].glyphDataTexture ? &fontData[pixelSize][charCode] : NULL;
 		}
 	}
 	return NULL;
+    } catch(const std::bad_alloc &) { return NULL; }
 }
 
 /**
@@ -236,9 +244,15 @@ uint16_t FreeTypeGX::cacheGlyphDataComplete(int16_t pixelSize)
 
 void FreeTypeGX::loadGlyphData(FT_Bitmap *bmp, ftgxCharData *charData)
 {
-	int glyphSize = (charData->textureWidth * charData->textureHeight) >> 1;
+    if(!bmp || !charData || (!bmp->buffer && bmp->width && bmp->rows) || !charData->textureWidth || !charData->textureHeight ||
+       charData->textureWidth>1024 || charData->textureHeight>1024 || (charData->textureWidth&7) || (charData->textureHeight&7) || bmp->width>charData->textureWidth ||
+       bmp->rows>charData->textureHeight || (bmp->width && bmp->rows && bmp->pixel_mode!=FT_PIXEL_MODE_GRAY) ||
+       (bmp->pitch>=0 ? (uint64_t)bmp->pitch : (uint64_t)-(int64_t)bmp->pitch)<bmp->width) return;
+	int glyphSize = ((u32)charData->textureWidth * charData->textureHeight) >> 1;
 
 	uint8_t *glyphData = (uint8_t *) memalign(32, glyphSize);
+    WX_MEMORY_ALLOC(GPU,WX_MEM_FONT,glyphData,glyphSize);
+    if(!glyphData) return;
 	memset(glyphData, 0x00, glyphSize);
 
 	uint8_t *src = (uint8_t *)bmp->buffer;
@@ -256,7 +270,7 @@ void FreeTypeGX::loadGlyphData(FT_Bitmap *bmp, ftgxCharData *charData)
 					if(x >= bmp->width || y >= bmp->rows)
 						continue;
 
-					pos = y * bmp->width + x;
+					pos = y * bmp->pitch + x;
 					*dst = (src[pos] & 0xF0);
 
 					if(x+1 < bmp->width)

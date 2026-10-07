@@ -10,6 +10,7 @@
 
 // Requested bytes, not allocator usable sizes. No pointer registry or allocation.
 struct Owner { uint64_t live, peak, allocations, releases, failures, largest, errors; };
+static_assert(WX_MEM_OWNER_COUNT<=24,"Recalculate bounded report batch reserve");
 static Owner owners[WX_MEM_OWNER_COUNT][3]; // MEM1, MEM2, failed/unknown
 static size_t stackPeaks[WX_MEM_OWNER_COUNT][2];
 struct Snapshot { char tag[24]; unsigned mem1Used,mem1Free,mem2Used,mem2Free,largest,integrity; };
@@ -17,7 +18,8 @@ static Snapshot snapshots[8];
 static unsigned head,count,dropped,serial,flushed,window,written;
 static bool outputFailed;
 static const char *names[]={"copy_io","zip_pack_io","zip_extract_io","rar_stored_io",
-    "seven_sdk","ftp_stack","ftp_core","home_overlay","gui_texture","directory_path"};
+    "seven_sdk","ftp_stack","ftp_core","home_overlay","gui_texture","directory_path","gif_frame","movie_frame","movie_stack",
+    "audio_ring","audio_stack","font_input","pdf_texture","archive_buffer","archive_scratch","audio_resample","gif_workspace","movie_rgb","movie_input","pdf_pixmap"};
 
 void wx_memory_record(unsigned owner,uintptr_t address,uint64_t bytes,int allocate)
 {
@@ -72,9 +74,9 @@ void wx_memory_snapshot(const char *tag)
 void wx_memory_flush(void)
 {
     // Main thread only, via existing probe flush. No writes without an event.
-    // Reserve 10 KiB for the maximum bounded row batch within the 64 KiB cap.
+    // Reserve 20 KiB for the maximum bounded row batch within the 64 KiB cap.
     unsigned irq=IRQ_Disable(); bool pending=serial!=flushed; IRQ_Restore(irq);
-    if(!pending || outputFailed || written>54*1024) return;
+    if(!pending || outputFailed || written>44*1024) return;
     FILE *f=fopen("sd:/apps/WiiXplorer/memory-probes.csv",window ? "a" : "w");
     if(!f) return;
     Owner copy[WX_MEM_OWNER_COUNT][3]; size_t stacks[WX_MEM_OWNER_COUNT][2];

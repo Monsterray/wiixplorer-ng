@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
+#include "Diagnostics/MemoryProbes.h"
 
 #include "Prompts/PromptWindows.h"
 #include "Prompts/ProgressWindow.h"
@@ -63,8 +64,10 @@ void WiiArchive::CloseFile()
 {
 	ClearList();
 
-	if(FileBuffer)
-		free(FileBuffer);
+	if(FileBuffer) {
+        WX_MEMORY_FREE(IO,WX_MEM_ARCHIVE_BUFFER,FileBuffer,FileSize);
+        free(FileBuffer);
+    }
 
 	if(File)
 		fclose(File);
@@ -104,6 +107,7 @@ bool WiiArchive::LoadFile(const u8 * Buffer, u32 Size)
 	CloseFile();
 
 	FileBuffer = (u8 *) malloc(Size);
+    WX_MEMORY_ALLOC(IO,WX_MEM_ARCHIVE_BUFFER,FileBuffer,Size);
 	if(!FileBuffer)
 		return false;
 
@@ -206,6 +210,7 @@ int WiiArchive::ExtractMember(int ind,const char *dest,bool withpath,u8 *buffer,
 int WiiArchive::ExtractFile(int index,const char *dest,bool withpath)
 {
     u8 *buffer=(u8*)malloc(1024*50);
+    WX_MEMORY_BUFFER(IO,WX_MEM_ARCHIVE_SCRATCH,buffer,1024*50);
     if(!buffer) return -1;
     int result=ExtractMember(index,dest,withpath,buffer,1024*50);
     free(buffer); return result;
@@ -214,6 +219,7 @@ int WiiArchive::ExtractAll(const char *dest)
 {
     if((!FileBuffer && !File) || !ArchivePreflight(*this,dest)) return -1;
     u8 *buffer=(u8*)malloc(1024*50);
+    WX_MEMORY_BUFFER(IO,WX_MEM_ARCHIVE_SCRATCH,buffer,1024*50);
     if(!buffer) return -1;
     int result=1;
     for(unsigned i=0;i<PathStructure.size() && result>0;++i)

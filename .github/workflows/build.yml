@@ -13,10 +13,16 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 tests/archives.py
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config libjpeg-dev zlib1g-dev
+      - run: |
+          for test in tpl_bounds gif_bounds audio_ring audio_decode movie_frames texture_stride video_codec font_glyph pdf_raster font_io image_lifetime image_publication browser_storage memory_probes memory_bench; do
+            python3 "tests/$test.py"
+          done
       - run: python3 tests/archive_fs.py
       - run: python3 tests/regression.py
       - run: python3 tests/stability.py
       - run: python3 tests/dolphin_process.py
+      - run: python3 tests/validate_bench.py
       - run: python3 tests/probes.py
       - run: python3 tests/hbc_agent.py
       - run: python3 tests/hbc_smoke.py

@@ -37,11 +37,12 @@ class BufferCircle
 		//!> Destructor
 		~BufferCircle();
 		//!> Set circle size
-		void Resize(int size);
+		bool Resize(int size);
 		//!> Get the circle size
 		int Size() { return SoundBuffer.size(); };
+		u32 Capacity() const { return BufferBlockSize; }
 		//!> Set/resize the buffer size
-		void SetBufferBlockSize(int size);
+		bool SetBufferBlockSize(int size);
 		//!> Remove a buffer
 		void RemoveBuffer(int pos);
 		//!> Set all buffers clear

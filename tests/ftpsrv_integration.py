@@ -57,6 +57,8 @@ class DeviceHandler {public:static DeviceHandler*Instance(){static DeviceHandler
 #include <string>
 #include <iostream>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <cassert>
 #include "ogc/lwp.h"
 #include "Settings.h"
 #include "DeviceControls/DeviceHandler.hpp"
@@ -72,6 +74,14 @@ extern "C" void wx_memory_record(unsigned,uintptr_t address,uint64_t bytes,int a
 }
 bool IsNetworkInit(){return true;}void Initialize_Network(){abort();}
 extern "C" int test_core_active(void);
+// Host fixture only: neither control nor passive data sockets need LAN access.
+// Loopback avoids macOS firewall prompts for a fresh temporary test executable.
+extern "C" int wx_test_bind(int fd,const struct sockaddr *address,socklen_t length){
+ assert(address->sa_family==AF_INET && length==sizeof(sockaddr_in));
+ sockaddr_in local=*(const sockaddr_in*)address;
+ local.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+ return bind(fd,(const sockaddr*)&local,sizeof(local));
+}
 extern "C" ssize_t wx_test_send(int fd,const void*b,size_t n,int flags){return send(fd,b,n>1024?(n>2048?2048:n):(n>17?17:n),flags);}
 int main(int argc,char **argv){
  Settings.FTPServer.Port=atoi(argv[1]);Settings.FTPServer.IdleTimeout=2;
@@ -92,7 +102,7 @@ int main(int argc,char **argv){
 }
 ''')
     flags=['-g','-fsanitize=address,undefined','-I'+str(tmp),'-I'+str(ROOT/'source'),'-pthread','-DWX_PROBE_LEVEL=1','-DWX_PROBE_NETWORK=1','-DWX_PROBE_CPU=0','-DWX_PROBE_GPU=0','-DWX_PROBE_IO=0','-DWX_PROBE_THREADS=0']
-    subprocess.run([os.environ.get('CC','cc'),'-std=gnu99',*flags,'-Dsend=wx_test_send','-c',str(tmp/'core.c'),'-o',str(tmp/'core.o')],check=True)
+    subprocess.run([os.environ.get('CC','cc'),'-std=gnu99',*flags,'-Dsend=wx_test_send','-Dbind=wx_test_bind','-c',str(tmp/'core.c'),'-o',str(tmp/'core.o')],check=True)
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++11',*flags,str(ROOT/'source/FTPOperations/FTPServer.cpp'),str(ROOT/'source/FTPOperations/WiiXplorerFtpVfs.cpp'),str(tmp/'app.cpp'),str(tmp/'core.o'),'-o',str(tmp/'server')],check=True)
     for dev in ('sd:','usb1:','nand:'):(tmp/dev).mkdir()
     (tmp/'nand:/secret').write_bytes(b'read-only')
@@ -117,7 +127,7 @@ int main(int argc,char **argv){
             assert before==after and before['threads']==before['core']==before['cycles']==before['devices']==0 and before['memory_live']==before['memory_events']==0
             refused()
             with socket.socket() as occupied:
-                occupied.bind(('0.0.0.0',port));occupied.listen()
+                occupied.bind(('127.0.0.1',port));occupied.listen()
                 failed=command('enable');assert not failed['running'] and failed['threads']==failed['core']==0 and failed['memory_live']==0
             started=command('enable');assert started['running'] and started['threads']==started['core']==1 and started['devices']==0 and started['memory_live']>32768
             with ftplib.FTP() as bad:

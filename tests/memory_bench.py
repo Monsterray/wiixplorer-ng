@@ -40,6 +40,14 @@ void LCLoadData(void *dst,void *src,unsigned n){assert(lcEnabled && dst==lc && n
 void LCStoreData(void *dst,void *src,unsigned n){assert(lcEnabled && src==lc && n==8192);memcpy(dst,src,n);}
 void DCFlushRange(void*,unsigned){}void DCInvalidateRange(void*,unsigned){}
 '''
+harness+=r'''
+bool staleCopy=false;unsigned copyCalls=0;
+void *benchMemcpy(void *dst,const void *src,size_t n){
+ if(!staleCopy || ++copyCalls==1) return memcpy(dst,src,n);
+ return dst; // Replay the previous cached output instead of the new row.
+}
+#define memcpy benchMemcpy
+'''
 harness+=source+r'''
 bool exists(const char *p){struct stat s;return stat(p,&s)==0;}
 void complete(const char *p,int value){FILE *f=fopen(p,"rb");assert(f && fgetc(f)==value);fclose(f);assert(!lcEnabled && allocations==0);}
@@ -61,7 +69,18 @@ int main(){
  while(fgets(line,sizeof(line),f)){char op[32],src[16],dst[16];unsigned block,repeat,bytes,verified;u64 us;
   assert(sscanf(line,"%31[^,],%15[^,],%15[^,],%u,%u,%u,%llu,%u",op,src,dst,&block,&repeat,&bytes,&us,&verified)==8);
   assert(verified && bytes==8388608 && us>0 && repeat<3);++rows;
- }fclose(f);assert(rows==144 && syncCalls==145);
+ }fclose(f);assert(rows==144 && syncCalls>145);
+ f=fopen("sd:/bench/memory-workingset.csv","rb");assert(f);assert(fgets(line,sizeof(line),f));rows=0;
+ while(fgets(line,sizeof(line),f)){char op[32],src[16],dst[16],state[16];unsigned block,stride,repeat,bytes,verified;u64 us;
+  assert(sscanf(line,"%31[^,],%15[^,],%15[^,],%15[^,],%u,%u,%u,%u,%llu,%u",op,src,dst,state,&block,&stride,&repeat,&bytes,&us,&verified)==10);
+  assert(verified && bytes==2097152 && block>=8192 && block<=1048576 && us>0 && repeat<3);++rows;
+ }fclose(f);assert(rows==768 && allocations==0);
+ mkdir("sd:/stale",0700);staleCopy=true;copyCalls=0;
+ assert(!MemoryWorkingSetBench("sd:/stale"));staleCopy=false;
+ assert(allocations==0);
+ f=fopen("sd:/stale/memory-workingset.csv","rb");assert(f);
+ assert(fgets(line,sizeof(line),f));assert(fgets(line,sizeof(line),f));
+ assert(fgets(line,sizeof(line),f) && strstr(line,",0\n"));fclose(f);
  unsigned beforeSyncFailure=lcActivations;
  failSync=true;RunMemoryBenchmark("sd:/sync-fail");complete("sd:/sync-fail/memory-complete",'0');failSync=false;
  assert(lcActivations==beforeSyncFailure);
@@ -79,4 +98,4 @@ with tempfile.TemporaryDirectory(prefix='wx-memory-check-') as tmp:
     p=Path(tmp);(p/'test.cpp').write_text(harness)
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++11','-O2','-fsanitize=address,undefined',str(p/'test.cpp'),'-lz','-o',str(p/'test')],check=True)
     subprocess.run([str(p/'test')],cwd=p,check=True,timeout=30)
-print('Memory benchmark: 144 verified rows (cached/uncached alias matrix), allocation cleanup, private directory, DMA corruption rejection and LC teardown passed')
+print('Memory benchmark: 144 alias/LC + 768 working-set verified rows, stale-output rejection, allocation cleanup, private directory, DMA corruption rejection and LC teardown passed')

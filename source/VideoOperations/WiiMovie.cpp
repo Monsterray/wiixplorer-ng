@@ -16,6 +16,10 @@
  ****************************************************************************/
 #include <asndlib.h>
 #include <unistd.h>
+#include <climits>
+#include <new>
+#include "Diagnostics/MemoryProbes.h"
+#include "Memory/MemoryBudget.h"
 #include "Controls/Application.h"
 #include "WiiMovie.hpp"
 #include "ImageOperations/TextureConverter.h"
@@ -29,7 +33,6 @@ WiiMovie::WiiMovie(const char * filepath)
 	currentFrame = 0.0f;
 	fps = 0.0f;
 	whichLoad = 0;
-	bDecoding = false;
 	ExitRequested = false;
 	Playing = false;
 	volume = 255*Settings.MusicVolume/100;
@@ -37,6 +40,7 @@ WiiMovie::WiiMovie(const char * filepath)
 	DecThread = LWP_THREAD_NULL;
 	ReadStackBuf = DecStackBuf = NULL;
 	FrameBufCount = 0;
+	FrameBytes = 0; workersReady=false; decodeFailed=false;
 
 	for(int i = 0; i < FRAME_BUFFERS; ++i)
 		FrameBuf[i] = NULL;
@@ -65,19 +69,27 @@ WiiMovie::WiiMovie(const char * filepath)
 	SndChannels = Video->getNumChannels();
 	SndFrequence = Video->getFrequency();
 	fps = Video->getFps();
-	maxSoundSize = Video->getMaxAudioSamples()*Video->getNumChannels()*2;
+	const u32 samples=Video->getMaxAudioSamples();
+    if(Video->hasSound() && (SndChannels<1 || SndChannels>2 || !samples ||
+       samples>(u32)(INT_MAX/(SndChannels*2*FRAME_BUFFERS)))) {
+        ExitRequested=true; Application::Instance()->PushForDelete(this); return;
+    }
+    maxSoundSize=Video->hasSound() ? samples*SndChannels*2 : 0;
 
 	if(Video->hasSound())
 	{
 		soundbuffer = &SoundBuffer;
-		SoundBuffer.Resize(SND_BUFFERS);
-		SoundBuffer.SetBufferBlockSize(maxSoundSize*FRAME_BUFFERS);
+        if((uint64_t)maxSoundSize*FRAME_BUFFERS*SND_BUFFERS>WxMemoryBudget() ||
+           !SoundBuffer.Resize(SND_BUFFERS) || !SoundBuffer.SetBufferBlockSize(maxSoundSize*FRAME_BUFFERS)) {
+            soundbuffer=NULL; ExitRequested=true; Application::Instance()->PushForDelete(this); return;
+        }
 	}
 
 	const int ReadStackBufSize = 32768;
 	const int DecStackBufSize = 16384;
 
 	ReadStackBuf = (u8 *) memalign(32, ReadStackBufSize + DecStackBufSize);
+	WX_MEMORY_ALLOC(THREADS,WX_MEM_MOVIE_STACK,ReadStackBuf,ReadStackBufSize+DecStackBufSize);
 	if(!ReadStackBuf)
 	{
 		ShowError(tr("Not enough memory"));
@@ -88,8 +100,13 @@ WiiMovie::WiiMovie(const char * filepath)
 
 	DecStackBuf = ReadStackBuf + ReadStackBufSize;
 
-	LWP_CreateThread (&ReadThread, UpdateThread, this, ReadStackBuf, ReadStackBufSize, 75);
-	LWP_CreateThread (&DecThread, DecodeThread, this, DecStackBuf, DecStackBufSize, 70);
+#if WX_PROBE_THREADS && WX_PROBE_LEVEL>=2
+    memset(ReadStackBuf,0xa5,ReadStackBufSize+DecStackBufSize);
+#endif
+    int rc=LWP_CreateThread(&ReadThread,UpdateThread,this,ReadStackBuf,ReadStackBufSize,75);
+    if(rc>=0) rc=LWP_CreateThread(&DecThread,DecodeThread,this,DecStackBuf,DecStackBufSize,70);
+    if(rc<0) { ExitRequested=true; Application::Instance()->PushForDelete(this); }
+    workersReady=true;
 }
 
 WiiMovie::~WiiMovie()
@@ -97,8 +114,6 @@ WiiMovie::~WiiMovie()
 	Playing = false;
 	ExitRequested = true;
 
-	ASND_StopVoice(0);
-	MusicPlayer::Instance()->Resume();
 
 	if(ReadThread != LWP_THREAD_NULL)
 	{
@@ -111,14 +126,18 @@ WiiMovie::~WiiMovie()
 		LWP_JoinThread(DecThread, NULL);
 	}
 
-	for(int i = 0; i < FRAME_BUFFERS; ++i)
-	{
-		if(FrameBuf[i])
-			free(FrameBuf[i]);
-	}
+    WX_MEMORY_FREE(CPU,WX_MEM_MOVIE_INPUT,EncodedFrame.data(),EncodedFrame.capacity());
+    ASND_StopVoice(0); soundbuffer=NULL;
+    MusicPlayer::Instance()->Resume();
+    GX_DrawDone();
+    for(int i=0;i<FRAME_BUFFERS;++i) {
+        WX_MEMORY_FREE(GPU,WX_MEM_MOVIE_FRAME,FrameBuf[i],FrameBytes);
+        MEM2_free(FrameBuf[i]);
+    }
 
-	if(ReadStackBuf != NULL)
-		free(ReadStackBuf);
+    WX_MEMORY_STACK(WX_MEM_MOVIE_STACK,ReadStackBuf,49152);
+    WX_MEMORY_FREE(THREADS,WX_MEM_MOVIE_STACK,ReadStackBuf,49152);
+    free(ReadStackBuf);
 
 	delete background;
 	delete exitBtn;
@@ -130,7 +149,7 @@ WiiMovie::~WiiMovie()
 
 bool WiiMovie::Play()
 {
-	if(!Video)
+	if(!Video || ExitRequested || !workersReady)
 		return false;
 
 	Playing = true;
@@ -227,6 +246,7 @@ void * WiiMovie::UpdateThread(void *arg)
 {
 	WiiMovie * Movie = static_cast<WiiMovie *>(arg);
 
+	while(!Movie->workersReady && !Movie->ExitRequested) usleep(100);
 	while(!Movie->ExitRequested)
 	{
 		Movie->ReadNextFrame();
@@ -242,20 +262,25 @@ void * WiiMovie::DecodeThread(void *arg)
 
 	int oldFrame = 0;
 
+	while(!Movie->workersReady && !Movie->ExitRequested) usleep(100);
 	while(!Movie->ExitRequested)
 	{
 		if(!Movie->Playing)
 			LWP_SuspendThread(Movie->DecThread);
 
-		oldFrame = Movie->Video->getCurrentFrameNr();
+		Movie->readDecodeMutex.lock();
+        oldFrame=Movie->Video->getCurrentFrameNr();
+        Movie->readDecodeMutex.unlock();
+		if(Movie->ExitRequested) break;
 		Movie->DecodeNextFrame();
 
-		while(   !Movie->ExitRequested
-			  && (   (Movie->FrameBufCount >= FRAME_BUFFERS)
-				  || (oldFrame == Movie->Video->getCurrentFrameNr())))
-		{
-			usleep(100);
-		}
+        while(!Movie->ExitRequested) {
+            Movie->readDecodeMutex.lock();
+            bool same=oldFrame==Movie->Video->getCurrentFrameNr();
+            Movie->readDecodeMutex.unlock();
+            if(Movie->FrameBufCount<FRAME_BUFFERS && !same) break;
+            usleep(100);
+        }
 	}
 
 	return NULL;
@@ -263,16 +288,18 @@ void * WiiMovie::DecodeThread(void *arg)
 
 void WiiMovie::ReadNextFrame()
 {
-	if(!Playing)
-		LWP_SuspendThread(ReadThread);
+	if(!Playing) LWP_SuspendThread(ReadThread);
+	if(ExitRequested || !Playing) return;
 
 	float FrameExpected = PlayTime.elapsed() * fps; // float is enough for up to 74 hours straight playing in 60 fps
 
-	while(currentFrame < FrameExpected)
+	unsigned catchup=0;
+	while(!ExitRequested && currentFrame < FrameExpected && catchup++<4)
 	{
 		readDecodeMutex.lock();
 		Video->loadNextFrame();
 		readDecodeMutex.unlock();
+		if(!Video->valid()) { Playing=false;ExitRequested=true;decodeFailed=true;return; }
 
 		currentFrame += 1.0f;
 
@@ -286,7 +313,11 @@ void WiiMovie::ReadNextFrame()
 				return;
 			}
 
-			int currentSize = SoundBuffer.GetBufferSize(whichLoad);
+            int currentSize=SoundBuffer.GetBufferSize(whichLoad);
+            if(!SoundBuffer.GetBuffer(whichLoad) || currentSize<0 || (u32)currentSize>SoundBuffer.Capacity() ||
+               (u32)maxSoundSize>SoundBuffer.Capacity()-(u32)currentSize) {
+                Playing=false;ExitRequested=true;decodeFailed=true;return;
+            }
 
 			currentSize += Video->getCurrentBuffer((s16 *) (&SoundBuffer.GetBuffer(whichLoad)[currentSize]))*SndChannels*2;
 			SoundBuffer.SetBufferSize(whichLoad, currentSize);
@@ -312,44 +343,54 @@ void WiiMovie::ReadNextFrame()
 
 void WiiMovie::DecodeNextFrame()
 {
-	if(!Video || !Playing)
-		return;
-
-	std::vector<u8> frameBuffer;
-
-	readDecodeMutex.lock();
-	Video->copyCurrentFrame(frameBuffer);
-	readDecodeMutex.unlock();
-
-	Video->decodeVideoFrame(VideoF, frameBuffer);
-
-	if(!VideoF.getData())
-		return;
-
-	bDecoding = true;
-
-	//! remember width to avoid unnecessary deallocate
-	if(width != VideoF.getWidth())
-	{
-		width = VideoF.getWidth();
-		height = VideoF.getHeight();
-		SetFullscreen();
-		//! release buffer as we might need more now
-		for(int i = 0; i < FRAME_BUFFERS; ++i)
-		{
-			if(FrameBuf[i])
-				free(FrameBuf[i]);
-			FrameBuf[i] = NULL;
-		}
-	}
-
-	if(!FrameBuf[FrameBufCount])
-		FrameBuf[FrameBufCount] = (u8 *) memalign(32, (width * height) << 1);
-
-	RGB8ToRGB565(VideoF.getData(), FrameBuf[FrameBufCount], width, height);
-	FrameBufCount++;
-
-	bDecoding = false;
+    if(!Video || !Playing || ExitRequested || FrameBufCount>=FRAME_BUFFERS) return;
+    readDecodeMutex.lock();
+    bool copied=true;
+#if WX_PROBE_LEVEL>0
+    const uintptr_t oldAddress=(uintptr_t)EncodedFrame.data();const size_t oldCapacity=EncodedFrame.capacity();
+#endif
+    try { Video->copyCurrentFrame(EncodedFrame); } catch(const std::bad_alloc &) { copied=false; }
+#if WX_PROBE_LEVEL>0
+    if(EncodedFrame.capacity()!=oldCapacity) {
+        WX_MEMORY_ALLOC(CPU,WX_MEM_MOVIE_INPUT,EncodedFrame.data(),EncodedFrame.capacity());
+        WX_MEMORY_FREE(CPU,WX_MEM_MOVIE_INPUT,(const void*)oldAddress,oldCapacity);
+    }
+#endif
+    readDecodeMutex.unlock();
+    if(!copied) { Playing=false; ExitRequested=true; decodeFailed=true; return; }
+    try { Video->decodeVideoFrame(VideoF,EncodedFrame); }
+    catch(const std::bad_alloc &) { Playing=false; ExitRequested=true; decodeFailed=true; return; }
+    if(!VideoF.getData()) return;
+    const int w=VideoF.getWidth(),h=VideoF.getHeight();
+    // GX texture dimensions, including padded 4x4 RGB565 tiles.
+    if(w<=0 || h<=0 || w>1024 || h>1024) {
+        Playing=false; ExitRequested=true; decodeFailed=true; return;
+    }
+    frameMutex.lock();
+    if(width!=w || height!=h) {
+        // Reserve room for the complete queue before accepting new dimensions.
+        if((uint64_t)ALIGN(w)*ALIGN(h)*2*FRAME_BUFFERS>WxMemoryBudget()) {
+            Playing=false; ExitRequested=true; decodeFailed=true; frameMutex.unlock(); return;
+        }
+        for(int i=0;i<FRAME_BUFFERS;++i) {
+            WX_MEMORY_FREE(GPU,WX_MEM_MOVIE_FRAME,FrameBuf[i],FrameBytes);
+            MEM2_free(FrameBuf[i]); FrameBuf[i]=NULL;
+        }
+        FrameBufCount=0; width=w; height=h; FrameBytes=ALIGN(w)*ALIGN(h)*2;
+        SetFullscreen();
+    }
+    int slot=FrameBufCount;
+    if(slot>=FRAME_BUFFERS) { frameMutex.unlock(); return; }
+    if(!FrameBuf[slot]) {
+        FrameBuf[slot]=(u8*)MEM2_alloc(FrameBytes);
+        WX_MEMORY_ALLOC(GPU,WX_MEM_MOVIE_FRAME,FrameBuf[slot],FrameBytes);
+    }
+    if(!FrameBuf[slot]) {
+        Playing=false; ExitRequested=true; decodeFailed=true; frameMutex.unlock(); return;
+    }
+    RGB8ToRGB565Stride(VideoF.getData(),FrameBuf[slot],width,height,VideoF.getPitch());
+    ++FrameBufCount;
+    frameMutex.unlock();
 }
 
 void WiiMovie::Draw()
@@ -359,15 +400,15 @@ void WiiMovie::Draw()
 
 	background->Draw();
 
+	frameMutex.lock();
 	if(FrameBufCount > 0)
 	{
 		if(FrameBuf[0])
 			Menu_DrawImg(FrameBuf[0], width, height, GX_TF_RGB565, GetLeft(), GetTop(), 0.0f, 0.0f, scaleX, scaleY, alpha);
 
+		GX_DrawDone(); // GPU has finished before this slot can be recycled.
 		//! rotate FIFO
-		//! we don't need to lock as render thread is highest prio and interrupts the decode thread
-		//! check if decode thread wasn't interrupted in the middle of decoding though
-		if(FrameBufCount > 1 && !bDecoding)
+		if(FrameBufCount > 1)
 		{
 			u8 *tmp = FrameBuf[0];
 
@@ -379,9 +420,11 @@ void WiiMovie::Draw()
 			FrameBufCount--;
 		}
 	}
+	frameMutex.unlock();
 }
 
 void WiiMovie::Update(GuiTrigger * t)
 {
+	if(decodeFailed.exchange(false)) { ShowError(tr("Not enough memory or invalid video dimensions")); Application::Instance()->PushForDelete(this); return; }
 	exitBtn->Update(t);
 }

@@ -25,15 +25,22 @@
  ***************************************************************************/
 #include <gccore.h>
 #include <malloc.h>
+#include <math.h>
+#include "Diagnostics/MemoryProbes.h"
+#include "Memory/MemoryBudget.h"
+#include "PdfRaster.h"
 #include "Controls/Application.h"
 #include "Controls/Taskbar.h"
 #include "PDFViewer.hpp"
 #include "sys.h"
 
 PDFViewer::PDFViewer(const char * filepath, const char * password)
-	: ImageViewer(NULL)
+	: ImageViewer(NULL, false), pageMutex(true)
 {
 	OutputImage = NULL;
+    imagewidth=imageheight=PageCount=0;
+    pageReady=false;
+    LWP_SemInit(&pageWake,0,1);
 	loadPage = -1;
 	currentPage = 1;
 	drawzoom = Settings.PDFLoadZoom;
@@ -48,13 +55,16 @@ PDFViewer::PDFViewer(const char * filepath, const char * password)
 	closexref();
 
 	OpenFile(filepath, password);
+    startThread();
 	LoadPage(currentPage);
 }
 
 PDFViewer::~PDFViewer()
 {
 	bExitRequested = true;
+    LWP_SemPost(pageWake);
 	shutdownThread();
+    LWP_SemDestroy(pageWake);
 	CloseFile();
 }
 
@@ -88,7 +98,9 @@ void PDFViewer::CloseFile()
 int PDFViewer::PreparePage(int pagenum)
 {
 	fz_error error;
-	fz_obj * pageobj = pdf_getpageobject(xref, pagenum);
+	if(!xref || pagenum<1 || pagenum>PageCount) return -1;
+    fz_obj * pageobj = pdf_getpageobject(xref, pagenum);
+    if(!pageobj) return -1;
 	error = pdf_loadpage(&drawpage, xref, pageobj);
 	if (error)
 	{
@@ -101,45 +113,40 @@ int PDFViewer::PreparePage(int pagenum)
 
 void PDFViewer::executeThread(void)
 {
-	//! the thread is started inside image viewer class
-	//! wait here till consturctor is finished of pdf viewer
-	suspendThread();
+    while(!bExitRequested) {
+        LWP_SemWait(pageWake);
+        if(bExitRequested) break;
+        pageMutex.lock();
+        int requested=loadPage;loadPage=-1;
+        if(requested>=1 && PreparePage(requested)==0 && PageToTexture()>0)
+            pageReady=true; // GUI publication belongs to the rendering thread.
+        pageMutex.unlock();
+    }
+    workerFinished=true;
+}
 
-	while(!bExitRequested)
-	{
-		if(loadPage == -1)
-			suspendThread();
-
-		if(!bExitRequested)
-		{
-			int ret = PreparePage(loadPage);
-			if(ret < 0) {
-				continue;
-			}
-			ret = PageToTexture();
-			if(ret <= 0)
-				continue;
-
-			image->SetImage(OutputImage, imagewidth, imageheight, GX_TF_RGB565);
-			SetStartUpImageSize();
-
-			if(SlideShowStart > 0)
-				image->SetEffect(EFFECT_FADE, Settings.ImageFadeSpeed);
-
-			loadPage = -1;
-		}
-	}
+void PDFViewer::Draw()
+{
+    if(bExitRequested) { LWP_SemPost(pageWake);ImageViewer::Draw();return; }
+    if(pageReady.load()) {
+        pageMutex.lock();
+        if(pageReady.exchange(false) && OutputImage) {
+            image->SetImage(OutputImage,imagewidth,imageheight,GX_TF_RGB565);
+            SetStartUpImageSize();
+            if(SlideShowStart>0) image->SetEffect(EFFECT_FADE,Settings.ImageFadeSpeed);
+        }
+        pageMutex.unlock();
+    }
+    ImageViewer::Draw();
 }
 
 bool PDFViewer::LoadPage(int pagenum)
 {
-	if(!xref)
-		return false;
-
-	FreePage();
-
-	loadPage = pagenum;
-	resumeThread();
+    if(!xref || pagenum<1 || pagenum>PageCount || getThread()==LWP_THREAD_NULL) return false;
+    pageMutex.lock();
+    pageReady=false;FreePage();loadPage=pagenum;
+    pageMutex.unlock();
+    LWP_SemPost(pageWake);
 
 	return true;
 }
@@ -165,6 +172,7 @@ bool PDFViewer::PreviousPage()
 
 void PDFViewer::FreePage()
 {
+    pageMutex.lock();
 	if(image && OutputImage && SlideShowStart > 0)
 	{
 		image->SetEffect(EFFECT_FADE, -Settings.ImageFadeSpeed);
@@ -176,10 +184,13 @@ void PDFViewer::FreePage()
 		Application::Instance()->SetGuiInputUpdate(true);
 	}
 
-	image->SetImage(NULL, 0, 0);
+	if(OutputImage) image->SetImage(NULL, 0, 0);
 
-	if(OutputImage)
-		free(OutputImage);
+    if(OutputImage) {
+        GX_DrawDone();
+        WX_MEMORY_FREE(GPU,WX_MEM_PDF_TEXTURE,OutputImage,(u32)imagewidth*imageheight*2);
+        MEM2_free(OutputImage);
+    }
 	OutputImage = NULL;
 
 	if(drawpage != nil)
@@ -191,6 +202,7 @@ void PDFViewer::FreePage()
 		pdf_agestoreditems(xref->store);
 		pdf_evictageditems(xref->store);
 	}
+    pageMutex.unlock();
 }
 
 int PDFViewer::PageToTexture()
@@ -200,27 +212,38 @@ int PDFViewer::PageToTexture()
 	fz_bbox bbox;
 	fz_pixmap *pix;
 
+    if(!drawpage || !drawcache || !isfinite(drawzoom) || drawzoom<=0) return -1;
 	ctm = fz_identity();
 	ctm = fz_concat(ctm, fz_translate(0, -drawpage->mediabox.y1));
 	ctm = fz_concat(ctm, fz_scale(drawzoom, -drawzoom));
 	ctm = fz_concat(ctm, fz_rotate(drawrotate + drawpage->rotate));
 
-	bbox = fz_roundrect(fz_transformrect(ctm, drawpage->mediabox));
-	int w = ALIGN(bbox.x1 - bbox.x0);
-	int h = ALIGN(bbox.y1 - bbox.y0);
+    fz_rect bounds=fz_transformrect(ctm,drawpage->mediabox);
+    double span=fmax((double)bounds.x1-bounds.x0,(double)bounds.y1-bounds.y0);
+    if(!isfinite(span) || span<=0) { FreePage();return -1; }
+    if(span>1020) {
+        ctm=fz_concat(ctm,fz_scale(1020/span,1020/span));
+        bounds=fz_transformrect(ctm,drawpage->mediabox);
+    }
+    int w=0,h=0;
+    if(!WxPdfRaster(bounds.x0,bounds.y0,bounds.x1,bounds.y1,WxMemoryBudget(),w,h)) { FreePage();return -1; }
+    bbox=fz_roundrect(bounds);
 
 	pix = fz_newpixmap(pdf_devicergb, bbox.x0, bbox.y0, w, h);
-	if(!pix)
+	if(!pix || !pix->samples || pix->n!=4 || pix->w!=w || pix->h!=h)
 	{
+		if(pix) fz_droppixmap(pix);
 		FreePage();
 		ThrowMsg(tr("Error:"), tr("Not enough memory."));
 		return -1;
 	}
 
+    WX_MEMORY_BUFFER(CPU,WX_MEM_PDF_PIXMAP,pix->samples,(u32)w*h*4);
 	// initialize white page
 	memset(pix->samples, 0xff, pix->h * pix->w * pix->n);
 
 	fz_device *dev = fz_newdrawdevice(drawcache, pix);
+    if(!dev) { fz_droppixmap(pix);FreePage();return -1; }
 	error = pdf_runcontentstream(dev, ctm, xref, drawpage->resources, drawpage->contents);
 	fz_freedevice(dev);
 	if (error)
@@ -233,7 +256,8 @@ int PDFViewer::PageToTexture()
 	// convert it to texture
 	int len = (w * h) << 1;
 
-	OutputImage = (u8 *) memalign(32, len);
+	OutputImage = (u8 *) MEM2_alloc(len);
+    WX_MEMORY_ALLOC(GPU,WX_MEM_PDF_TEXTURE,OutputImage,len);
 	if(!OutputImage)
 	{
 		fz_droppixmap(pix);

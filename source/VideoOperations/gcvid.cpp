@@ -32,43 +32,33 @@
 #include <cstring> //memcmp
 #include <string>
 #include <cassert>
+#include <climits>
+#include <cmath>
+#include <new>
+#include <sys/stat.h>
+#include "Memory/MemoryBudget.h"
+#include "Diagnostics/MemoryProbes.h"
 using namespace std;
 
-void readThpHeader(FILE* f, ThpHeader& h)
+static u32 VideoBE32(const u8 *p) { return ((u32)p[0]<<24)|((u32)p[1]<<16)|((u32)p[2]<<8)|p[3]; }
+static s16 VideoBE16(const u8 *p) { return (s16)(((u16)p[0]<<8)|p[1]); }
+template<class T> static bool VideoWords(FILE *f,T &out,size_t bytes,size_t tag=0)
 {
-  fread(&h, sizeof(h), 1, f);
+    u8 data[sizeof(T)];memset(&out,0,sizeof(out));
+    if(bytes>sizeof(T) || fread(data,1,bytes,f)!=bytes || ferror(f)) return false;
+    if(tag) memcpy(&out,data,tag);
+    for(size_t i=tag;i<bytes;i+=4) { u32 word=VideoBE32(data+i);memcpy((u8*)&out+i,&word,4); }
+    return true;
 }
-
-void readThpComponents(FILE* f, ThpComponents& c)
+static bool readThpHeader(FILE *f,ThpHeader &h) { return VideoWords(f,h,sizeof(h),4); }
+static bool readThpComponents(FILE *f,ThpComponents &c)
 {
-  fread(&c, sizeof(c), 1, f);
+    u8 data[20];if(fread(data,1,20,f)!=20) return false;
+    c.numComponents=VideoBE32(data);memcpy(c.componentTypes,data+4,16);return true;
 }
-
-void readThpVideoInfo(FILE* f, ThpVideoInfo& i, bool isVersion11)
-{
-  fread(&i, sizeof(i), 1, f);
-  if(!isVersion11)
-  {
-	i.unknown = 0;
-	fseek(f, -4, SEEK_CUR);
-  }
-}
-
-void readThpAudioInfo(FILE* f, ThpAudioInfo& i, bool isVersion11)
-{
-  fread(&i, sizeof(i), 1, f);
-  if(!isVersion11)
-  {
-	i.numData = 1;
-	fseek(f, -4, SEEK_CUR);
-  }
-}
-
-void readMthHeader(FILE* f, MthHeader& h)
-{
-  fread(&h, sizeof(h), 1, f);
-}
-
+static bool readThpVideoInfo(FILE *f,ThpVideoInfo &i,bool v11) { return VideoWords(f,i,v11?12:8); }
+static bool readThpAudioInfo(FILE *f,ThpAudioInfo &i,bool v11) { bool okay=VideoWords(f,i,v11?16:12);if(!v11)i.numData=1;return okay; }
+static bool readMthHeader(FILE *f,MthHeader &h) { return VideoWords(f,h,sizeof(h),4); }
 
 struct DecStruct
 {
@@ -104,13 +94,13 @@ s32 thpAudioGetNewSample(DecStruct& s)
   s32 ret;
   if((s.blockCount & 1) != 0)
   {
-	s32 t = (*s.currSrcByte  << 28) & 0xf0000000;
+	s32 t = ((u32)*s.currSrcByte << 28) & 0xf0000000;
 	ret = t >> 28; //this has to be an arithmetic shift
 	++s.currSrcByte;
   }
   else
   {
-	s32 t = (*s.currSrcByte << 24) & 0xf0000000;
+	s32 t = ((u32)*s.currSrcByte << 24) & 0xf0000000;
 	ret = t >> 28; //this has to be an arithmetic shift
   }
 
@@ -123,16 +113,13 @@ int thpAudioDecode(s16 * destBuffer, const u8* srcBuffer, bool separateChannelsI
   if(destBuffer == NULL || srcBuffer == NULL)
 	return 0;
 
-  ThpAudioBlockHeader* head = (ThpAudioBlockHeader*)srcBuffer;
-
-  u32 channelInSize = head->channelSize;
-  u32 numSamples = head->numSamples;
+  u32 channelInSize=VideoBE32(srcBuffer),numSamples=VideoBE32(srcBuffer+4);
 
   const u8* srcChannel1 = srcBuffer + sizeof(ThpAudioBlockHeader);
   const u8* srcChannel2 = srcChannel1 + channelInSize;
 
-  s16* table1 = head->table1;
-  s16* table2 = head->table2;
+  s16 table1[16],table2[16];
+  for(unsigned i=0;i<16;++i) {table1[i]=VideoBE16(srcBuffer+8+i*2);table2[i]=VideoBE16(srcBuffer+40+i*2);}
 
   s16* destChannel1, * destChannel2;
   u32 delta;
@@ -159,20 +146,20 @@ int thpAudioDecode(s16 * destBuffer, const u8* srcBuffer, bool separateChannelsI
 
 	thpAudioInitialize(s, srcChannel1);
 
-	s16 prev1 = *(s16*)(srcBuffer + 72);
-	s16 prev2 = *(s16*)(srcBuffer + 74);
+	s16 prev1 = VideoBE16(srcBuffer+72);
+	s16 prev2 = VideoBE16(srcBuffer+74);
 
 	for(u32 i = 0; i < numSamples; ++i)
 	{
 	  s64 res = (s64)thpAudioGetNewSample(s);
-	  res = ((res << s.shift) << 11); //convert to 53.11 fixedpoint
+	  res = (res * ((s64)1 << (s.shift+11))); //convert to 53.11 fixedpoint
 
 	  //these values are 53.11 fixed point numbers
 	  s64 val1 = table1[2*s.index];
 	  s64 val2 = table1[2*s.index + 1];
 
 	  //convert to 48.16 fixed point
-	  res = (val1*prev1 + val2*prev2 + res) << 5;
+	  res = (val1*prev1 + val2*prev2 + res) * 32;
 
 	  //rounding:
 	  u16 decimalPlaces = res & 0xffff;
@@ -203,15 +190,15 @@ int thpAudioDecode(s16 * destBuffer, const u8* srcBuffer, bool separateChannelsI
 	//so no comments here (different lines are marked with XXX)
 
 	thpAudioInitialize(s, srcChannel1);
-	s16 prev1 = *(s16*)(srcBuffer + 72);
-	s16 prev2 = *(s16*)(srcBuffer + 74);
+	s16 prev1 = VideoBE16(srcBuffer+72);
+	s16 prev2 = VideoBE16(srcBuffer+74);
 	for(u32 i = 0; i < numSamples; ++i)
 	{
 	  s64 res = (s64)thpAudioGetNewSample(s);
-	  res = ((res << s.shift) << 11);
+	  res = (res * ((s64)1 << (s.shift+11)));
 	  s64 val1 = table1[2*s.index];
 	  s64 val2 = table1[2*s.index + 1];
-	  res = (val1*prev1 + val2*prev2 + res) << 5;
+	  res = (val1*prev1 + val2*prev2 + res) * 32;
 	  u16 decimalPlaces = res & 0xffff;
 	  if(decimalPlaces > 0x8000)
 		++res;
@@ -228,15 +215,15 @@ int thpAudioDecode(s16 * destBuffer, const u8* srcBuffer, bool separateChannelsI
 	}
 
 	thpAudioInitialize(s, srcChannel2);//XXX
-	prev1 = *(s16*)(srcBuffer + 76);//XXX
-	prev2 = *(s16*)(srcBuffer + 78);//XXX
+	prev1 = VideoBE16(srcBuffer+76);//XXX
+	prev2 = VideoBE16(srcBuffer+78);//XXX
 	for(u32 j = 0; j < numSamples; ++j)
 	{
 	  s64 res = (s64)thpAudioGetNewSample(s);
-	  res = ((res << s.shift) << 11);
+	  res = (res * ((s64)1 << (s.shift+11)));
 	  s64 val1 = table2[2*s.index];//XXX
 	  s64 val2 = table2[2*s.index + 1];//XXX
-	  res = (val1*prev1 + val2*prev2 + res) << 5;
+	  res = (val1*prev1 + val2*prev2 + res) * 32;
 	  u16 decimalPlaces = res & 0xffff;
 	  if(decimalPlaces > 0x8000)
 		++res;
@@ -264,26 +251,23 @@ VideoFrame::VideoFrame()
 VideoFrame::~VideoFrame()
 { dealloc(); }
 
-void VideoFrame::resize(int width, int height)
+bool VideoFrame::resize(int width,int height)
 {
-  if(width == _w && height == _h)
-	return;
-
-  dealloc();
-  _w = width;
-  _h = height;
-
-  //24 bpp, 4 byte padding
-  _p = 3*width;
-  _p += (4 - _p%4)%4;
-
-  _data = new u8[_p*_h];
+    if(width<=0 || height<=0 || width>1024 || height>1024) return false;
+    if(width==_w && height==_h && _data) return true;
+    int pitch=(3*width+3)&~3;
+    u8 *staged=new(std::nothrow) u8[pitch*height];
+    WX_MEMORY_ALLOC(CPU,WX_MEM_MOVIE_RGB,staged,pitch*height);
+    if(!staged) return false;
+    dealloc();_w=width;_h=height;_p=pitch;_data=staged;return true;
 }
 
 void VideoFrame::dealloc()
 {
-  if(_data != NULL)
-	delete [] _data;
+  if(_data != NULL) {
+    WX_MEMORY_FREE(CPU,WX_MEM_MOVIE_RGB,_data,_p*_h);
+    delete [] _data;
+  }
   _data = NULL;
   _w = _h = _p = 0;
 }
@@ -298,7 +282,7 @@ void swapRB(VideoFrame& f)
 
   for(int y = 0; y < hyt; ++y)
   {
-	for(int x = 0, x2 = 2; x < pitch; x += 3, x2 += 3)
+	for(int x = 0, x2 = 2; x < f.getWidth()*3; x += 3, x2 += 3)
 	{
 	  u8 t = currLine[x];
 	  currLine[x] = currLine[x2];
@@ -320,7 +304,7 @@ FILETYPE getFiletype(FILE* f)
   fseek(f, 0, SEEK_SET);
 
   u8 buff[4];
-  fread(buff, 1, 4, f);
+  if(fread(buff,1,4,f)!=4 || ferror(f)) return UNKNOWN;
 
   FILETYPE ret = UNKNOWN;
   if(memcmp("THP\0", buff, 4) == 0)
@@ -344,8 +328,10 @@ long getFilesize(FILE* f)
 }
 
 VideoFile::VideoFile(FILE* f)
-: _f(f)
-{}
+: _f(f),_valid(false),_fileSize(0),_budget(WxMemoryBudget())
+{
+    struct stat st;if(f && fstat(fileno(f),&st)==0 && st.st_size>=0) _fileSize=st.st_size;
+}
 
 VideoFile::~VideoFile()
 {
@@ -371,10 +357,11 @@ u8 endBytesMth[] = { 0xff, 0xd9, 0xff, 0 }; //used in mth files
 
 static inline int convertToRealJpeg(u8* dest, const u8* src, int srcSize)
 {
+  if(!dest || !src || srcSize<3) return 0;
   int start, end = 0;
 
   int j;
-  for(j = srcSize - 1; (src[j] == 0) && (j > 2); --j)
+  for(j = srcSize - 1; (j > 2) && (src[j] == 0); --j)
 	; //search end of data
 
   if(src[j] == 0xd9) //thp file
@@ -407,13 +394,16 @@ static inline int convertToRealJpeg(u8* dest, const u8* src, int srcSize)
 }
 
 void decodeRealJpeg(const u8* data, int size, VideoFrame& dest);
+static void decodeJpegFile(FILE *,VideoFrame &);
 
 void VideoFile::loadFrame(VideoFrame& frame, const u8* data, int size) const
 {
   const u8 *buff = data;
 
+  if(!data || size<=0) { frame.dealloc();return; }
   if(!_decodeBuffer.empty())
   {
+      if((size_t)size>_decodeBuffer.size()/2) { frame.dealloc();return; }
 	  //convert format so jpeglib understands it...
 	  size = convertToRealJpeg((u8 *)&_decodeBuffer[0], buff, size);
 	  buff = &_decodeBuffer[0];
@@ -424,42 +414,37 @@ void VideoFile::loadFrame(VideoFrame& frame, const u8* data, int size) const
 }
 
 
-ThpVideoFile::ThpVideoFile(FILE* f)
-: VideoFile(f)
+ThpVideoFile::ThpVideoFile(FILE *f):VideoFile(f)
 {
-  readThpHeader(f, _head);
-
-  //this is just to find files that have this field != 0, i
-  //have no such a file
-  assert(_head.offsetsDataOffset == 0);
-
-  readThpComponents(f, _components);
-  for(u32 i = 0; i < _components.numComponents; ++i)
-  {
-	if(_components.componentTypes[i] == 0) //video
-	  readThpVideoInfo(_f, _videoInfo, _head.version == 0x00011000);
-	else if(_components.componentTypes[i] == 1) //audio
-	{
-	  readThpAudioInfo(_f, _audioInfo, _head.version == 0x00011000);
-	  assert(_head.maxAudioSamples != 0);
-	}
-  }
-
-  _numInts = 3;
-  if(_head.maxAudioSamples != 0)
-	_numInts = 4;
-
-  _currFrameNr = -1;
-  _nextFrameOffset = _head.firstFrameOffset;
-  _nextFrameSize = _head.firstFrameSize;
-  // pre-allocated buffer for speed up
-  _currFrameData.resize(_head.maxBufferSize); //include some padding
-  _decodeBuffer.resize(_head.maxBufferSize << 1); // max size included jpeg padding
-  loadNextFrame();
+    memset(&_head,0,sizeof(_head));memset(&_components,0,sizeof(_components));
+    memset(&_videoInfo,0,sizeof(_videoInfo));memset(&_audioInfo,0,sizeof(_audioInfo));
+    _currFrameNr=-1;_nextFrameOffset=0;_nextFrameSize=0;_numInts=3;
+    if(!readThpHeader(f,_head) || memcmp(_head.tag,"THP\0",4) ||
+       (_head.version!=0x00010000 && _head.version!=0x00011000) ||
+       !_head.numFrames || _head.numFrames>INT_MAX || !std::isfinite(_head.fps) || _head.fps<1 || _head.fps>240 ||
+       !_head.maxBufferSize || _head.maxBufferSize>_budget/4 || _head.maxBufferSize>INT_MAX/2 ||
+       _head.componentDataOffset>_fileSize || fseeko(f,_head.componentDataOffset,SEEK_SET)!=0 ||
+       !readThpComponents(f,_components) || !_components.numComponents || _components.numComponents>16) return;
+    for(u32 i=0;i<_components.numComponents;++i) {
+        if(_components.componentTypes[i]==0) { if(!readThpVideoInfo(f,_videoInfo,_head.version==0x00011000)) return; }
+        else if(_components.componentTypes[i]==1) { if(!readThpAudioInfo(f,_audioInfo,_head.version==0x00011000)) return; }
+        else return;
+    }
+    if(!_videoInfo.width || !_videoInfo.height || _videoInfo.width>1024 || _videoInfo.height>1024) return;
+    if(_head.maxAudioSamples) {
+        if(_audioInfo.numChannels<1 || _audioInfo.numChannels>2 || !_audioInfo.frequency || _audioInfo.frequency>48000 ||
+           _audioInfo.numData!=1 || _head.maxAudioSamples>INT_MAX/(2*_audioInfo.numChannels*8)) return;
+        _numInts=4;
+    }
+    _nextFrameOffset=_head.firstFrameOffset;_nextFrameSize=_head.firstFrameSize;
+    try { _decodeBuffer.resize((size_t)_head.maxBufferSize*2); }
+    catch(const std::bad_alloc &) { return; }
+    _valid=true;loadNextFrame();
 }
 
 void ThpVideoFile::loadNextFrame()
 {
+  if(!_valid) return;
   ++_currFrameNr;
   if(_currFrameNr >= (int) _head.numFrames)
   {
@@ -468,11 +453,12 @@ void ThpVideoFile::loadNextFrame()
 	_nextFrameSize = _head.firstFrameSize;
   }
 
-  fseek(_f, _nextFrameOffset, SEEK_SET);
-  fread(&_currFrameData[0], 1, _nextFrameSize, _f);
-
-  _nextFrameOffset += _nextFrameSize;
-  _nextFrameSize = *(u32*)&_currFrameData[0];
+  if(!_valid || _nextFrameSize<(u32)_numInts*4 || _nextFrameSize>_head.maxBufferSize ||
+     _nextFrameOffset>_fileSize || _nextFrameSize>_fileSize-_nextFrameOffset ||
+     fseeko(_f,_nextFrameOffset,SEEK_SET)!=0) { _valid=false;_currFrameData.clear();return; }
+  try { _currFrameData.resize(_nextFrameSize); } catch(const std::bad_alloc &) { _valid=false;return; }
+  if(fread(_currFrameData.data(),1,_nextFrameSize,_f)!=_nextFrameSize || ferror(_f)) { _valid=false;_currFrameData.clear();return; }
+  _nextFrameOffset+=_nextFrameSize;_nextFrameSize=VideoBE32(_currFrameData.data());
 }
 
 void ThpVideoFile::getCurrentFrame(VideoFrame& f) const
@@ -482,8 +468,11 @@ void ThpVideoFile::getCurrentFrame(VideoFrame& f) const
 
 void ThpVideoFile::decodeVideoFrame(VideoFrame& f, const std::vector<u8> &frameBuffer) const
 {
-	int size = *(u32*)(&frameBuffer[0] + 8);
-	loadFrame(f, &frameBuffer[0] + 4*_numInts, size);
+    size_t header=(size_t)_numInts*4;
+    if(frameBuffer.size()<header) { f.dealloc();return; }
+    u32 bytes=VideoBE32(frameBuffer.data()+8);
+    if(bytes>INT_MAX || bytes>frameBuffer.size()-header) { f.dealloc();return; }
+    loadFrame(f,frameBuffer.data()+header,bytes);
 }
 
 int ThpVideoFile::getNumChannels() const
@@ -507,30 +496,34 @@ int ThpVideoFile::getCurrentBuffer(s16* data) const
   if(!hasSound())
 	return 0;
 
-  int jpegSize = *(u32*)(&_currFrameData[0] + 8);
-  const u8* src = &_currFrameData[0] + _numInts*4 + jpegSize;
-
-  return thpAudioDecode(data, src, false, _audioInfo.numChannels == 2);
+  size_t header=(size_t)_numInts*4;
+  if(!data || _currFrameData.size()<header) return 0;
+  u32 jpegSize=VideoBE32(_currFrameData.data()+8);
+  if(jpegSize>_currFrameData.size()-header) return 0;
+  const u8 *src=_currFrameData.data()+header+jpegSize;
+  size_t bytes=_currFrameData.size()-header-jpegSize;
+  if(bytes<80) return 0;
+  u32 channel=VideoBE32(src),samples=VideoBE32(src+4);
+  if(samples>_head.maxAudioSamples || channel>bytes-80 ||
+     (_audioInfo.numChannels==2 && channel>(bytes-80)/2) ||
+     ((u64)samples+13)/14*8>channel) return 0;
+  return thpAudioDecode(data,src,false,_audioInfo.numChannels==2);
 }
 
-MthVideoFile::MthVideoFile(FILE* f)
-: VideoFile(f)
+MthVideoFile::MthVideoFile(FILE *f):VideoFile(f)
 {
-  readMthHeader(f, _head);
-
-  _currFrameNr = -1;
-  _nextFrameOffset = _head.offset;
-  _nextFrameSize = _head.firstFrameSize;
-  _thisFrameSize = 0;
-
-  // pre-allocated buffer for speed up
-  _currFrameData.resize(_head.maxFrameSize);
-  _decodeBuffer.resize(_head.maxFrameSize << 1); // max size included jpeg padding
-  loadNextFrame();
+    memset(&_head,0,sizeof(_head));_currFrameNr=-1;_nextFrameOffset=0;_nextFrameSize=_thisFrameSize=0;
+    if(!readMthHeader(f,_head) || memcmp(_head.tag,"MTHP",4) || !_head.numFrames || _head.numFrames>INT_MAX ||
+       !_head.width || !_head.height || _head.width>1024 || _head.height>1024 || !_head.fps || _head.fps>240 ||
+       !_head.maxFrameSize || _head.maxFrameSize>_budget/4 || _head.maxFrameSize>INT_MAX/2) return;
+    _nextFrameOffset=_head.offset;_nextFrameSize=_head.firstFrameSize;
+    try { _decodeBuffer.resize((size_t)_head.maxFrameSize*2); } catch(const std::bad_alloc &) { return; }
+    _valid=true;loadNextFrame();
 }
 
 void MthVideoFile::loadNextFrame()
 {
+  if(!_valid) return;
   ++_currFrameNr;
   if(_currFrameNr >= (int) _head.numFrames)
   {
@@ -539,15 +532,12 @@ void MthVideoFile::loadNextFrame()
 	_nextFrameSize = _head.firstFrameSize;
   }
 
-  fseek(_f, _nextFrameOffset, SEEK_SET);
-  _currFrameData.resize(_nextFrameSize);
-  fread(&_currFrameData[0], 1, _nextFrameSize, _f);
-  _thisFrameSize = _nextFrameSize;
-
-  u32 nextSize;
-  nextSize = *(u32*)(&_currFrameData[0]);
-  _nextFrameOffset += _nextFrameSize;
-  _nextFrameSize = nextSize;
+  if(_nextFrameSize<4 || _nextFrameSize>_head.maxFrameSize || _nextFrameOffset>_fileSize ||
+     _nextFrameSize>_fileSize-_nextFrameOffset || fseeko(_f,_nextFrameOffset,SEEK_SET)!=0) { _valid=false;_currFrameData.clear();return; }
+  try { _currFrameData.resize(_nextFrameSize); } catch(const std::bad_alloc &) { _valid=false;return; }
+  if(fread(_currFrameData.data(),1,_nextFrameSize,_f)!=_nextFrameSize || ferror(_f)) { _valid=false;_currFrameData.clear();return; }
+  _thisFrameSize=_nextFrameSize;_nextFrameOffset+=_nextFrameSize;
+  _nextFrameSize=VideoBE32(_currFrameData.data());
 
 }
 
@@ -558,22 +548,19 @@ void MthVideoFile::getCurrentFrame(VideoFrame& f) const
 
 void MthVideoFile::decodeVideoFrame(VideoFrame& f, const std::vector<u8> &frameBuffer) const
 {
-  int size = frameBuffer.size();
-  loadFrame(f, &frameBuffer[0] + 4, size - 4);
+  if(frameBuffer.size()<4 || frameBuffer.size()>INT_MAX) { f.dealloc();return; }
+  loadFrame(f,frameBuffer.data()+4,frameBuffer.size()-4);
 }
 
 JpgVideoFile::JpgVideoFile(FILE* f)
 : VideoFile(f)
 {
-  vector<u8> data(getFilesize(f));
-  fread(&data[0], 1, getFilesize(f), f);
-
-  loadFrame(_currFrame, &data[0], getFilesize(f));
+  decodeJpegFile(f,_currFrame);_valid=_currFrame.getData()!=NULL;
 }
 
 void JpgVideoFile::getCurrentFrame(VideoFrame& f) const
 {
-  f.resize(_currFrame.getWidth(), _currFrame.getHeight());
+  if(!f.resize(_currFrame.getWidth(),_currFrame.getHeight())) { f.dealloc();return; }
   memcpy(f.getData(), _currFrame.getData(),f.getPitch()*f.getHeight());
 }
 
@@ -588,20 +575,17 @@ VideoFile* openVideo(const string& fileName)
   if(f == NULL)
 	return NULL;
 
-  FILETYPE type = getFiletype(f);
-  switch(type)
-  {
-	case THP:
-	  return new ThpVideoFile(f);
-	case MTH:
-	  return new MthVideoFile(f);
-	case JPG:
-	  return new JpgVideoFile(f);
-
-	default:
-	  fclose(f);
-	  return NULL;
+  FILETYPE type=getFiletype(f);VideoFile *video=NULL;
+  // Constructors consume/close f through their base once construction starts.
+  switch(type) {
+    case THP: video=new(std::nothrow) ThpVideoFile(f);break;
+    case MTH: video=new(std::nothrow) MthVideoFile(f);break;
+    case JPG: video=new(std::nothrow) JpgVideoFile(f);break;
+    default: fclose(f);return NULL;
   }
+  if(!video) { fclose(f);return NULL; }
+  if(!video->valid()) { delete video;return NULL; }
+  return video;
 }
 
 void closeVideo(VideoFile*& vf)
@@ -620,117 +604,41 @@ extern "C"
 //the following functions are needed to let
 //libjpeg read from memory instead of from a file...
 //it's a little clumsy to do :-|
-const u8* g_jpegBuffer;
-int g_jpegSize;
-bool g_isLoading = false;
-
-void jpegInitSource(j_decompress_ptr cinfo UNUSED)
-{}
-
-boolean jpegFillInputBuffer(j_decompress_ptr cinfo)
+struct MovieJpegError { jpeg_error_mgr base; jmp_buf jump; };
+static void MovieJpegExit(j_common_ptr cinfo)
 {
-  cinfo->src->next_input_byte = g_jpegBuffer;
-  cinfo->src->bytes_in_buffer = g_jpegSize;
-  return TRUE;
+    longjmp(((MovieJpegError*)cinfo->err)->jump,1);
 }
-
-void jpegSkipInputData(j_decompress_ptr cinfo, long num_bytes)
+static void MovieJpegMessage(j_common_ptr cinfo,int level) { if(level<0) ++cinfo->err->num_warnings; }
+static void DecodeJpeg(const u8 *data,int size,FILE *file,VideoFrame &dest)
 {
-  cinfo->src->next_input_byte += num_bytes;
-  cinfo->src->bytes_in_buffer -= num_bytes;
+    if(!file && (!data || size<=0)) { dest.dealloc();return; }
+    jpeg_decompress_struct cinfo={};MovieJpegError error={};
+    volatile bool created=false;
+    cinfo.err=jpeg_std_error(&error.base);error.base.error_exit=MovieJpegExit;error.base.emit_message=MovieJpegMessage;
+    if(setjmp(error.jump)) {
+        if(created) jpeg_destroy_decompress(&cinfo);
+        dest.dealloc();return;
+    }
+    jpeg_create_decompress(&cinfo);created=true;
+    // libjpeg v8 declares this input mutable, although it only reads it.
+    if(file) jpeg_stdio_src(&cinfo,file);else jpeg_mem_src(&cinfo,const_cast<u8 *>(data),size);
+    bool okay=jpeg_read_header(&cinfo,TRUE)==JPEG_HEADER_OK;
+    okay=okay && cinfo.image_width>0 && cinfo.image_height>0 && cinfo.image_width<=1024 && cinfo.image_height<=1024;
+    if(okay) {
+        cinfo.do_fancy_upsampling=FALSE;cinfo.do_block_smoothing=FALSE;
+        cinfo.out_color_space=JCS_RGB;cinfo.quantize_colors=FALSE;
+        cinfo.scale_num=cinfo.scale_denom=1;cinfo.dct_method=JDCT_FASTEST;
+        okay=jpeg_start_decompress(&cinfo) && cinfo.output_components==3 &&
+             dest.resize(cinfo.output_width,cinfo.output_height);
+        while(okay && cinfo.output_scanline<cinfo.output_height) {
+            u8 *row=dest.getData()+cinfo.output_scanline*dest.getPitch();
+            okay=jpeg_read_scanlines(&cinfo,&row,1)==1;
+        }
+        if(okay) okay=jpeg_finish_decompress(&cinfo) && !cinfo.err->num_warnings;
+    }
+    jpeg_destroy_decompress(&cinfo);
+    if(!okay) dest.dealloc();
 }
-
-void jpegTermSource(j_decompress_ptr cinfo UNUSED)
-{}
-
-void jpegErrorHandler(j_common_ptr cinfo)
-{
-  char buff[1024];
-  (*cinfo->err->format_message)(cinfo, buff);
-  //MessageBox(g_hWnd, buff, "JpegLib error:", MB_OK);
-}
-
-void decodeRealJpeg(const u8* data, int size, VideoFrame& dest)
-{
-  if(g_isLoading)
-	return;
-  g_isLoading = true;
-
-  /*
-  //debug
-  FILE* fout = fopen("curr.jpg", "wb");
-  fwrite(data, size, 1, fout);
-  fclose(fout);
-  //*/
-
-  //decompressor state
-  jpeg_decompress_struct cinfo;
-  jpeg_error_mgr errorMgr;
-
-  //read from memory manager
-  jpeg_source_mgr sourceMgr;
-
-  cinfo.err = jpeg_std_error(&errorMgr);
-  errorMgr.error_exit = jpegErrorHandler;
-
-  jpeg_create_decompress(&cinfo);
-
-  //setup read-from-memory
-  g_jpegBuffer = data;
-  g_jpegSize = size;
-  sourceMgr.bytes_in_buffer = size;
-  sourceMgr.next_input_byte = data;
-  sourceMgr.init_source = jpegInitSource;
-  sourceMgr.fill_input_buffer = jpegFillInputBuffer;
-  sourceMgr.skip_input_data = jpegSkipInputData;
-  sourceMgr.resync_to_restart = jpeg_resync_to_restart;
-  sourceMgr.term_source = jpegTermSource;
-  cinfo.src = &sourceMgr;
-
-  jpeg_read_header(&cinfo, TRUE);
-
-#if 1
-  //set quality/speed parameters to speed:
-  cinfo.do_fancy_upsampling = FALSE;
-  cinfo.do_block_smoothing = FALSE;
-  cinfo.out_color_space = JCS_RGB;
-  cinfo.quantize_colors = FALSE;
-
-// for faster loading
-  cinfo.scale_num = 1;
-  cinfo.scale_denom = 1;
-  cinfo.dct_method = JDCT_FASTEST;
-#endif
-
-  jpeg_start_decompress(&cinfo);
-
-  dest.resize(cinfo.output_width, cinfo.output_height);
-
-  if(cinfo.num_components == 3)
-  {
-	int y = 0;
-	while(cinfo.output_scanline < cinfo.output_height)
-	{
-	  //invert image because windows wants it downside up
-	  u8* destBuffer =  &dest.getData()[y*dest.getPitch()];
-
-	  //NO idea why jpeglib wants a pointer to a pointer
-	  jpeg_read_scanlines(&cinfo, &destBuffer, 1);
-	  ++y;
-	}
-
-	//jpeglib gives an error in jpeg_finish_decompress() if no all
-	//scanlines are read by the application... :-|
-	//(but because we read all scanlines, it's not really needed)
-	cinfo.output_scanline = cinfo.output_height;
-
-  }
-  else
-  {
-	//MessageBox(g_hWnd, "Only RGB videos are currently supported.", "oops?", MB_OK);
-  }
-
-  jpeg_finish_decompress(&cinfo);
-  jpeg_destroy_decompress(&cinfo);
-  g_isLoading = false;
-}
+void decodeRealJpeg(const u8 *data,int size,VideoFrame &dest) { DecodeJpeg(data,size,NULL,dest); }
+static void decodeJpegFile(FILE *file,VideoFrame &dest) { DecodeJpeg(NULL,0,file,dest); }

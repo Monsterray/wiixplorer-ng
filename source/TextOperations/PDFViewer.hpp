@@ -37,6 +37,7 @@ class PDFViewer : public ImageViewer
 		void OpenFile(const char * filename, const char * password = NULL);
 		void CloseFile();
 		bool LoadPage(int pagenum);
+        void Draw();
 		bool NextPage();
 		bool PreviousPage();
 		//! Virtual overloads to adjust to imageviewer
@@ -51,7 +52,10 @@ class PDFViewer : public ImageViewer
 		bool LoadImage(int index, bool silent UNUSED = false) { return LoadPage(index); };
 		bool LoadImageList(const char * filepath UNUSED) { return true; };
 
-		u8 * OutputImage;
+		CMutex pageMutex;
+        sem_t pageWake;
+        std::atomic<bool> pageReady;
+        u8 * OutputImage;
 		fz_glyphcache *drawcache;
 		pdf_page *drawpage;
 		float drawzoom;

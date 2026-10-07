@@ -24,6 +24,11 @@
  * for WiiXplorer 2010
  ***************************************************************************/
 #include <malloc.h>
+#include <climits>
+#include <new>
+#include <ogc/irq.h>
+#include <ogc/cache.h>
+#include "Diagnostics/MemoryProbes.h"
 #include "Tools/tools.h"
 #include "BufferCircle.hpp"
 
@@ -41,44 +46,37 @@ BufferCircle::~BufferCircle()
 	BufferReady.clear();
 }
 
-void BufferCircle::SetBufferBlockSize(int size)
+bool BufferCircle::SetBufferBlockSize(int size)
 {
-	if(size < 0)
-		return;
-
-	BufferBlockSize = size;
-
-	for(int i = 0; i < Size(); i++)
-	{
-		if(SoundBuffer[i] != NULL)
-			free(SoundBuffer[i]);
-
-		SoundBuffer[i] = (u8 *) memalign(32, ALIGN32(BufferBlockSize));
-		BufferSize[i] = 0;
-		BufferReady[i] = false;
-	}
+    if(size<0 || size>INT_MAX-32) return false;
+    std::vector<u8*> staged;
+    try { staged.resize(Size(),NULL); } catch(const std::bad_alloc &) { return false; }
+    for(int i=0;i<Size();++i) {
+        if(size) { staged[i]=(u8*)memalign(32,ALIGN32(size)); WX_MEMORY_ALLOC(CPU,WX_MEM_AUDIO_RING,staged[i],ALIGN32(size)); }
+        if(size && !staged[i]) { for(size_t j=0;j<staged.size();++j) { WX_MEMORY_FREE(CPU,WX_MEM_AUDIO_RING,staged[j],ALIGN32(size)); free(staged[j]); } return false; }
+    }
+    FreeBuffer(); SoundBuffer.swap(staged); BufferBlockSize=size;
+    return true;
 }
 
-void BufferCircle::Resize(int size)
+bool BufferCircle::Resize(int size)
 {
-	while(size < Size())
-		RemoveBuffer(Size()-1);
-
-	int oldSize = Size();
-
-	SoundBuffer.resize(size);
-	BufferSize.resize(size);
-	BufferReady.resize(size);
-
-	for(int i = oldSize; i < Size(); i++)
-	{
-		if(BufferBlockSize > 0)
-			SoundBuffer[i] = (u8 *) memalign(32, ALIGN32(BufferBlockSize));
-		else
-			SoundBuffer[i] = NULL;
-		BufferSize[i] = 0;
-		BufferReady[i] = false;
-	}
+    if(size<0 || size>UINT16_MAX) return false; // which is a u16 API index.
+    if(size==Size()) return true;
+    if(size<Size()) { while(size<Size()) RemoveBuffer(Size()-1); return true; }
+    std::vector<u8*> buffers;
+    std::vector<u32> sizes;
+    std::vector<bool> ready;
+    const int old=Size();
+    try { buffers=SoundBuffer; sizes=BufferSize; ready=BufferReady;
+          buffers.resize(size,NULL); sizes.resize(size,0); ready.resize(size,false); }
+    catch(const std::bad_alloc &) { return false; }
+    for(int i=old;i<size;++i) {
+        if(BufferBlockSize) { buffers[i]=(u8*)memalign(32,ALIGN32(BufferBlockSize)); WX_MEMORY_ALLOC(CPU,WX_MEM_AUDIO_RING,buffers[i],ALIGN32(BufferBlockSize)); }
+        if(BufferBlockSize && !buffers[i]) { for(int j=old;j<i;++j) { WX_MEMORY_FREE(CPU,WX_MEM_AUDIO_RING,buffers[j],ALIGN32(BufferBlockSize)); free(buffers[j]); } return false; }
+    }
+    SoundBuffer.swap(buffers); BufferSize.swap(sizes); BufferReady.swap(ready);
+    return true;
 }
 
 void BufferCircle::RemoveBuffer(int pos)
@@ -86,12 +84,16 @@ void BufferCircle::RemoveBuffer(int pos)
 	if(!Valid(pos))
 		return;
 
-	if(SoundBuffer[pos] != NULL)
+	if(SoundBuffer[pos] != NULL) {
+		WX_MEMORY_FREE(CPU,WX_MEM_AUDIO_RING,SoundBuffer[pos],ALIGN32(BufferBlockSize));
 		free(SoundBuffer[pos]);
+	}
 
 	SoundBuffer.erase(SoundBuffer.begin()+pos);
 	BufferSize.erase(BufferSize.begin()+pos);
 	BufferReady.erase(BufferReady.begin()+pos);
+	if(pos<(int)which) --which;
+	if(which>=Size()) which=0;
 }
 
 void BufferCircle::ClearBuffer()
@@ -108,8 +110,10 @@ void BufferCircle::FreeBuffer()
 {
 	for(int i = 0; i < Size(); i++)
 	{
-		if(SoundBuffer[i] != NULL)
+		if(SoundBuffer[i] != NULL) {
+			WX_MEMORY_FREE(CPU,WX_MEM_AUDIO_RING,SoundBuffer[i],ALIGN32(BufferBlockSize));
 			free(SoundBuffer[i]);
+		}
 
 		SoundBuffer[i] = NULL;
 		BufferSize[i] = 0;
@@ -119,10 +123,12 @@ void BufferCircle::FreeBuffer()
 
 void BufferCircle::LoadNext()
 {
+	if(!Size()) { which=0; return; }
+	unsigned irq=IRQ_Disable();
 	BufferReady[which] = false;
 	BufferSize[which] = 0;
-
 	which = Next();
+	IRQ_Restore(irq);
 }
 
 void BufferCircle::SetBufferReady(int pos, bool state)
@@ -130,7 +136,10 @@ void BufferCircle::SetBufferReady(int pos, bool state)
 	if(!Valid(pos))
 		return;
 
-	BufferReady[pos] = state;
+	if(state && SoundBuffer[pos] && BufferSize[pos]) DCFlushRange(SoundBuffer[pos],BufferSize[pos]);
+	unsigned irq=IRQ_Disable();
+	BufferReady[pos] = state && SoundBuffer[pos] && BufferSize[pos]>0;
+	IRQ_Restore(irq);
 }
 
 void BufferCircle::SetBufferSize(int pos, int size)
@@ -138,5 +147,8 @@ void BufferCircle::SetBufferSize(int pos, int size)
 	if(!Valid(pos))
 		return;
 
-	BufferSize[pos] = size;
+	unsigned irq=IRQ_Disable();
+	if(size<0 || (u32)size>BufferBlockSize) { BufferSize[pos]=0; BufferReady[pos]=false; }
+	else BufferSize[pos] = size;
+	IRQ_Restore(irq);
 }

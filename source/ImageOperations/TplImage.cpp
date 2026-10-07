@@ -28,6 +28,7 @@
 #include <gccore.h>
 #include <malloc.h>
 #include <string.h>
+#include <new>
 #include "FileOperations/fileops.h"
 #include "TextureConverter.h"
 #include "TplImage.h"
@@ -64,75 +65,61 @@ TplImage::~TplImage()
 	if(TPLBuffer)
 		free(TPLBuffer);
 
-	Texture.clear();
 	TextureHeader.clear();
-	TplTextureBuffer.clear();
 }
 
-bool TplImage::LoadImage(const u8 * imgBuffer, u32 imgSize)
+static u32 TplBE32(const u8 *p)
 {
-	if(TPLBuffer)
-		free(TPLBuffer);
+    return ((u32)p[0]<<24)|((u32)p[1]<<16)|((u32)p[2]<<8)|p[3];
+}
 
-	TPLBuffer = NULL;
-	TPLSize = 0;
-
-	if(!imgBuffer)
-		return false;
-
-	TPLBuffer = (u8 *) malloc(imgSize);
-	if(!TPLBuffer)
-		return false;
-
-	TPLSize = imgSize;
-
-	memcpy(TPLBuffer, imgBuffer, imgSize);
-
-	return ParseTplFile();
+bool TplImage::LoadImage(const u8 *imgBuffer, u32 imgSize)
+{
+    free(TPLBuffer); TPLBuffer=NULL; TPLSize=0; TextureHeader.clear();
+    if(!imgBuffer || imgSize<12) return false;
+    TPLBuffer=(u8*)malloc(imgSize);
+    if(!TPLBuffer) return false;
+    TPLSize=imgSize; memcpy(TPLBuffer,imgBuffer,imgSize);
+    bool okay=false;
+    try { okay=ParseTplFile(); } catch(const std::bad_alloc &) {}
+    if(!okay) { free(TPLBuffer); TPLBuffer=NULL; TPLSize=0; TextureHeader.clear(); }
+    return okay;
 }
 
 bool TplImage::ParseTplFile()
 {
-	if(!TPLBuffer)
-		return false;
-
-	TPLHeader = (const TPL_Header *) TPLBuffer;
-
-	if(TPLHeader->magic != 0x0020AF30)
-		return false;
-
-	if(TPLHeader->head_size != 12)
-		return false;
-
-	const TPL_Texture * curTexture = (const TPL_Texture *) (TPLHeader+1);
-
-	for(u32 i = 0; i < TPLHeader->num_textures; i++)
-	{
-		Texture.resize(i+1);
-		TextureHeader.resize(i+1);
-		TplTextureBuffer.resize(i+1);
-
-		Texture[i] = curTexture;
-
-		TextureHeader[i] = (const TPL_Texture_Header *) ((const u8 *) TPLBuffer+Texture[i]->text_header_offset);
-
-		TplTextureBuffer[i] = TPLBuffer + TextureHeader[i]->offset;
-
-		curTexture++;
-	}
-
-	return true;
-
+    if(!TPLBuffer || TPLSize<12 || TplBE32(TPLBuffer)!=0x0020af30 ||
+       TplBE32(TPLBuffer+8)!=12) return false;
+    u32 count=TplBE32(TPLBuffer+4);
+    // Defensive metadata ceiling: <=144 KiB descriptors, not a payload limit.
+    if(!count || count>4096 || count>(TPLSize-12)/8) return false;
+    TextureHeader.reserve(count);
+    for(u32 i=0;i<count;++i) {
+        u32 offset=TplBE32(TPLBuffer+12+8*i);
+        if(offset<12+8*count || offset>TPLSize || sizeof(TPL_Texture_Header)>TPLSize-offset) return false;
+        const u8 *p=TPLBuffer+offset;
+        TPL_Texture_Header h={};
+        h.height=((u16)p[0]<<8)|p[1]; h.width=((u16)p[2]<<8)|p[3];
+        h.format=TplBE32(p+4); h.offset=TplBE32(p+8);
+        // GX_InitTexObj dimensions are 1..1024; reject unsupported palettes.
+        if(!h.width || !h.height || h.width>1024 || h.height>1024 ||
+           h.format==GX_TF_CI4 || h.format==GX_TF_CI8 || h.format==GX_TF_CI14) return false;
+        TextureHeader.push_back(h);
+        int bytes=GetTextureSize(i);
+        if(bytes<=0 || h.offset<offset+sizeof(TPL_Texture_Header) || h.offset>TPLSize ||
+           (u32)bytes>TPLSize-h.offset) return false;
+    }
+    return true;
 }
 
 int TplImage::GetWidth(int pos)
 {
-	if(pos < 0 || pos >= (int) Texture.size())
+	if(pos < 0 || pos >= (int) TextureHeader.size())
 	{
 		return 0;
 	}
 
-	return TextureHeader[pos]->width;
+	return TextureHeader[pos].width;
 }
 
 int TplImage::GetHeight(int pos)
@@ -142,7 +129,7 @@ int TplImage::GetHeight(int pos)
 		return 0;
 	}
 
-	return TextureHeader[pos]->height;
+	return TextureHeader[pos].height;
 }
 
 u32 TplImage::GetFormat(int pos)
@@ -152,17 +139,17 @@ u32 TplImage::GetFormat(int pos)
 		return 0;
 	}
 
-	return TextureHeader[pos]->format;
+	return TextureHeader[pos].format;
 }
 
 const u8 * TplImage::GetTextureBuffer(int pos)
 {
-	if(pos < 0 || pos >= (int) TplTextureBuffer.size())
+	if(pos < 0 || pos >= (int) TextureHeader.size())
 	{
 		return 0;
 	}
 
-	return TplTextureBuffer[pos];
+	return TPLBuffer + TextureHeader[pos].offset;
 }
 
 int TplImage::GetTextureSize(int pos)
@@ -181,7 +168,7 @@ int TplImage::GetTextureSize(int pos)
 			case GX_TF_I8:
 			case GX_TF_IA4:
 			case GX_TF_CI8:
-				len = ((width+7)>>3)*((height+7)>>2)*32;
+				len = ((width+7)>>3)*((height+3)>>2)*32;
 				break;
 			case GX_TF_IA8:
 			case GX_TF_CI14:
@@ -193,7 +180,7 @@ int TplImage::GetTextureSize(int pos)
 				len = ((width+3)>>2)*((height+3)>>2)*32*2;
 				break;
 			default:
-				len = ((width+3)>>2)*((height+3)>>2)*32*2;
+				len = 0;
 				break;
 	}
 
@@ -202,38 +189,38 @@ int TplImage::GetTextureSize(int pos)
 
 gdImagePtr TplImage::ConvertToGD(int pos)
 {
-	if(pos < 0 || pos >= (int) Texture.size())
+	if(pos < 0 || pos >= (int) TextureHeader.size())
 	{
 		return 0;
 	}
 
 	gdImagePtr gdImg = 0;
 
-	switch(TextureHeader[pos]->format)
+	switch(TextureHeader[pos].format)
 	{
 		case GX_TF_RGB565:
-			RGB565ToGD(TplTextureBuffer[pos], TextureHeader[pos]->width, TextureHeader[pos]->height, &gdImg);
+			RGB565ToGD(GetTextureBuffer(pos), TextureHeader[pos].width, TextureHeader[pos].height, &gdImg);
 			break;
 		case GX_TF_RGB5A3:
-			RGB565A3ToGD(TplTextureBuffer[pos], TextureHeader[pos]->width, TextureHeader[pos]->height, &gdImg);
+			RGB565A3ToGD(GetTextureBuffer(pos), TextureHeader[pos].width, TextureHeader[pos].height, &gdImg);
 			break;
 		case GX_TF_RGBA8:
-			RGBA8ToGD(TplTextureBuffer[pos], TextureHeader[pos]->width, TextureHeader[pos]->height, &gdImg);
+			RGBA8ToGD(GetTextureBuffer(pos), TextureHeader[pos].width, TextureHeader[pos].height, &gdImg);
 			break;
 		case GX_TF_I4:
-			I4ToGD(TplTextureBuffer[pos], TextureHeader[pos]->width, TextureHeader[pos]->height, &gdImg);
+			I4ToGD(GetTextureBuffer(pos), TextureHeader[pos].width, TextureHeader[pos].height, &gdImg);
 			break;
 		case GX_TF_I8:
-			I8ToGD(TplTextureBuffer[pos], TextureHeader[pos]->width, TextureHeader[pos]->height, &gdImg);
+			I8ToGD(GetTextureBuffer(pos), TextureHeader[pos].width, TextureHeader[pos].height, &gdImg);
 			break;
 		case GX_TF_IA4:
-			IA4ToGD(TplTextureBuffer[pos], TextureHeader[pos]->width, TextureHeader[pos]->height, &gdImg);
+			IA4ToGD(GetTextureBuffer(pos), TextureHeader[pos].width, TextureHeader[pos].height, &gdImg);
 			break;
 		case GX_TF_IA8:
-			IA8ToGD(TplTextureBuffer[pos], TextureHeader[pos]->width, TextureHeader[pos]->height, &gdImg);
+			IA8ToGD(GetTextureBuffer(pos), TextureHeader[pos].width, TextureHeader[pos].height, &gdImg);
 			break;
 		case GX_TF_CMPR:
-			CMPToGD(TplTextureBuffer[pos], TextureHeader[pos]->width, TextureHeader[pos]->height, &gdImg);
+			CMPToGD(GetTextureBuffer(pos), TextureHeader[pos].width, TextureHeader[pos].height, &gdImg);
 			break;
 		default:
 			gdImg = 0;

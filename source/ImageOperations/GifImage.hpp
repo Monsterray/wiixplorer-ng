@@ -56,6 +56,7 @@ class GifImage
 				  float scaleY, int alpha, int minwidth, int maxwidth,
 				  int minheight, int maxheight);
 	protected:
+		void ClearFrames();
 		int MainWidth;
 		int MainHeight;
 		int last;

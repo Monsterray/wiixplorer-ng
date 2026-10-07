@@ -25,13 +25,17 @@
  ***************************************************************************/
 #include <gccore.h>
 #include <malloc.h>
+#include <memory>
+#include <new>
+#include <algorithm>
+#include "Memory/mem2.h"
+#include "Diagnostics/MemoryProbes.h"
 #include <string.h>
 #include "VideoOperations/video.h"
 #include "Language/gettext.h"
 #include "Tools/tools.h"
 #include "GifImage.hpp"
 
-#define LZW_BUFF_SIZE   (17*1024)
 
 typedef struct _GIFLSDtag
 {
@@ -73,15 +77,7 @@ GifImage::GifImage(const u8 * img, int imgSize)
 	LoadImage(img, imgSize);
 }
 
-GifImage::~GifImage()
-{
-	for(u32 i = 0; i < Frames.size(); i++)
-	{
-		if(Frames[i].image)
-			free(Frames[i].image);
-	}
-	Frames.clear();
-}
+GifImage::~GifImage() { ClearFrames(); }
 
 u8 * GifImage::GetFrameImage(int pos)
 {
@@ -91,424 +87,170 @@ u8 * GifImage::GetFrameImage(int pos)
 	return Frames[pos].image;
 }
 
-// ****************************************************************************
-// * LZWDecoder (C/C++)													   *
-// * Codec to perform LZW (GIF Variant) decompression.						*
-// *						 (c) Nov2000, Juan Soulie <jsoulie@cplusplus.com> *
-// ****************************************************************************
-//
-// Parameter description:
-//  - bufIn: Input buffer containing a "de-blocked" GIF/LZW compressed image.
-//  - bufOut: Output buffer where result will be stored.
-//  - InitCodeSize: Initial CodeSize to be Used
-//	(GIF files include this as the first byte in a picture block)
-//  - AlignedWidth : Width of a row in memory (including alignment if needed)
-//  - Width, Height: Physical dimensions of image.
-//  - Interlace: 1 for Interlaced GIFs.
-//
-static int LZWDecoder (char * bufIn, char * bufOut,
-				short InitCodeSize, int AlignedWidth,
-				int Width, int Height, const int Interlace)
+// GIF89a LZW, with bytewise bounded code reads and fixed-size dictionary.
+// See https://www.w3.org/Graphics/GIF/spec-gif89a.txt (deferred clear codes).
+struct GifLzwTables { u16 prefix[4096]; u8 suffix[4096], stack[4096]; };
+static bool LZWDecoder(const u8 *input,size_t bytes,u8 *out,unsigned initial,
+                       unsigned stride,unsigned width,unsigned height,bool interlace,GifLzwTables &workspace)
 {
-	int n;
-	int row=0,col=0;				// used to point output if Interlaced
-	int nPixels, maxPixels;			// Output pixel counter
-
-	short CodeSize;					// Current CodeSize (size in bits of codes)
-	short ClearCode;				// Clear code : resets decompressor
-	short EndCode;					// End code : marks end of information
-
-	long whichBit;					// Index of next bit in bufIn
-	long LongCode;					// Temp. var. from which Code is retrieved
-	short Code;						// Code extracted
-	short PrevCode = 0;				// Previous Code
-	short OutCode;					// Code to output
-
-	// Translation Table:
-	short *Prefix = new short[LZW_BUFF_SIZE+1];				// Prefix: index of another Code
-	unsigned char *Suffix = new unsigned char[LZW_BUFF_SIZE+1];		// Suffix: terminating character
-	short FirstEntry;				// Index of first free entry in table
-	short NextEntry;				// Index of next free entry in table
-
-	unsigned char *OutStack = new unsigned char[LZW_BUFF_SIZE+1];	// Output buffer
-	int OutIndex;					// Characters in OutStack
-
-	int RowOffset;					// Offset in output buffer for current row
-
-	// Set up values that depend on InitCodeSize Parameter.
-	CodeSize = InitCodeSize+1;
-	ClearCode = (1 << InitCodeSize);
-	EndCode = ClearCode + 1;
-	NextEntry = FirstEntry = ClearCode + 2;
-
-	whichBit=0;
-	nPixels = 0;
-	maxPixels = Width*Height;
-	RowOffset =0;
-
-	while (nPixels<maxPixels) {
-		OutIndex = 0;							// Reset Output Stack
-
-		// GET NEXT CODE FROM bufIn:
-		// LZW compression uses code items longer than a single byte.
-		// For GIF Files, code sizes are variable between 9 and 12 bits
-		// That's why we must read data (Code) this way:
-		LongCode=le32(*((u32*)(bufIn+whichBit/8)));	// Get some bytes from bufIn
-		LongCode>>=(whichBit&7);				// Discard too low bits
-		Code =(LongCode & ((1<<CodeSize)-1) );	// Discard too high bits
-		whichBit += CodeSize;					// Increase Bit Offset
-
-		// SWITCH, DIFFERENT POSIBILITIES FOR CODE:
-		if (Code == EndCode)					// END CODE
-			break;								// Exit LZW Decompression loop
-
-		if (Code == ClearCode) {				// CLEAR CODE:
-			CodeSize = InitCodeSize+1;			// Reset CodeSize
-			NextEntry = FirstEntry;				// Reset Translation Table
-			PrevCode=Code;				// Prevent next to be added to table.
-			continue;							// restart, to get another code
-		}
-		if (Code < NextEntry)					// CODE IS IN TABLE
-			OutCode = Code;						// Set code to output.
-
-		else {									// CODE IS NOT IN TABLE:
-			OutIndex++;			// Keep "first" character of previous output.
-			OutCode = PrevCode;					// Set PrevCode to be output
-		}
-
-		// EXPAND OutCode IN OutStack
-		// - Elements up to FirstEntry are Raw-Codes and are not expanded
-		// - Table Prefices contain indexes to other codes
-		// - Table Suffices contain the raw codes to be output
-		while (OutCode >= FirstEntry)
-		{
-			if (OutIndex > LZW_BUFF_SIZE)
-			{
-				delete [] OutStack;
-				delete [] Suffix;
-				delete [] Prefix;
-				return 0;
-			}
-			OutStack[OutIndex++] = Suffix[OutCode];	// Add suffix to Output Stack
-			OutCode = Prefix[OutCode];				// Loop with preffix
-		}
-
-		// NOW OutCode IS A RAW CODE, ADD IT TO OUTPUT STACK.
-		if (OutIndex > LZW_BUFF_SIZE)
-		{
-			delete [] OutStack;
-			delete [] Suffix;
-			delete [] Prefix;
-			return 0;
-		}
-		OutStack[OutIndex++] = (unsigned char) OutCode;
-
-		// ADD NEW ENTRY TO TABLE (PrevCode + OutCode)
-		// (EXCEPT IF PREVIOUS CODE WAS A CLEARCODE)
-		if (PrevCode!=ClearCode) {
-			Prefix[NextEntry] = PrevCode;
-			Suffix[NextEntry] = (unsigned char) OutCode;
-			NextEntry++;
-
-			// Prevent Translation table overflow:
-			if (NextEntry>=LZW_BUFF_SIZE)
-			{
-				delete [] OutStack;
-				delete [] Suffix;
-				delete [] Prefix;
-				return 0;
-			}
-
-			// INCREASE CodeSize IF NextEntry IS INVALID WITH CURRENT CodeSize
-			if (NextEntry >= (1<<CodeSize)) {
-				if (CodeSize < 12) CodeSize++;
-				else {}				// Do nothing. Maybe next is Clear Code.
-			}
-		}
-
-		PrevCode = Code;
-
-		// Avoid the possibility of overflow on 'bufOut'.
-		if (nPixels + OutIndex > maxPixels) OutIndex = maxPixels-nPixels;
-
-		// OUTPUT OutStack (LAST-IN FIRST-OUT ORDER)
-		for (n=OutIndex-1; n>=0; n--) {
-			if (col==Width)						// Check if new row.
-			{
-				if (Interlace) {				// If interlaced::
-						 if ((row&7)==0) {row+=8; if (row>=Height) row=4;}
-					else if ((row&3)==0) {row+=8; if (row>=Height) row=2;}
-					else if ((row&1)==0) {row+=4; if (row>=Height) row=1;}
-					else row+=2;
-				}
-				else							// If not interlaced:
-					row++;
-
-				RowOffset=row*AlignedWidth;		// Set new row offset
-				col=0;
-			}
-			bufOut[RowOffset+col]=OutStack[n];	// Write output
-			col++;	nPixels++;					// Increase counters.
-		}
-
-	}	// while (main decompressor loop)
-
-	delete [] OutStack;
-	delete [] Suffix;
-	delete [] Prefix;
-
-	return whichBit;
+    if(!input || !out || initial<2 || initial>8 || !width || !height || stride<width) return false;
+    GifLzwTables *table=&workspace;
+    unsigned clear=1u<<initial,end=clear+1,next=end+1,bits=initial+1;
+    int previous=-1; unsigned first=0,pixels=0,row=0,col=0,pass=0;
+    size_t bit=0;
+    const unsigned starts[]={0,4,2,1},steps[]={8,8,4,2};
+    for(;;) {
+        size_t position=bit/8; unsigned shift=bit&7,need=(shift+bits+7)/8,word=0;
+        if(position>bytes || need>bytes-position) return false;
+        for(unsigned j=0;j<need;++j) word|=(unsigned)input[position+j]<<(8*j);
+        unsigned code=(word>>shift)&((1u<<bits)-1); bit+=bits;
+        if(code==end) return pixels==width*height;
+        if(code==clear) { next=end+1;bits=initial+1;previous=-1;continue; }
+        unsigned original=code,n=0;
+        if(previous<0) { if(code>=clear) return false; }
+        else if(code==next && next<4096) { table->stack[n++]=first;code=previous; }
+        else if(code>=next) return false;
+        while(code>=end+1) {
+            if(code>=next || n>=4095) return false;
+            table->stack[n++]=table->suffix[code];code=table->prefix[code];
+        }
+        if(code>=clear || n>=4096) return false;
+        first=code;table->stack[n++]=first;
+        if(previous>=0 && next<4096) {
+            table->prefix[next]=previous;table->suffix[next]=first;++next;
+            if(next==(1u<<bits) && bits<12) ++bits;
+        }
+        previous=original;
+        if(n>width*height-pixels) return false;
+        while(n) {
+            if(col==width) {
+                col=0;row+=interlace ? steps[pass] : 1;
+                if(interlace) while(row>=height && pass<3) row=starts[++pass];
+            }
+            if(row>=height) return false;
+            out[row*stride+col++]=table->stack[--n];++pixels;
+        }
+    }
 }
 
-void GifImage::LoadImage(const u8 * img, int imgSize)
+static u16 GifLE16(const u8 *p) { return p[0]|((u16)p[1]<<8); }
+static bool GifBlocks(const u8 *img,size_t size,size_t &pos,std::vector<u8> *data,size_t budget)
 {
-	if(memcmp(img, "GIF", 3) != 0)
-		return;
-
-	int pos = 6;
-
-	GIFLSDtag GifLSD;
-
-	memcpy(&GifLSD, &img[pos], sizeof(GIFLSDtag));
-	pos += sizeof(GIFLSDtag);
-
-	int GlobalBPP = (GifLSD.PackedFields & 0x07) + 1;
-
-	GifLSD.ScreenWidth = le16(GifLSD.ScreenWidth);
-	GifLSD.ScreenHeight = le16(GifLSD.ScreenHeight);
-
-	MainWidth = GifLSD.ScreenWidth;
-	MainHeight = GifLSD.ScreenHeight;
-
-	GIFCOLOR * GlobalColorMap = new (std::nothrow) GIFCOLOR[1 << GlobalBPP];
-	if(!GlobalColorMap)
-	{
-		ShowError(tr("Not enough memory."));
-		return;
-	}
-
-	if (GifLSD.PackedFields & 0x80)	// File has global color map?
-	{
-		for(int n = 0; n < (1 << GlobalBPP); n++)
-		{
-			GlobalColorMap[n].r = img[pos++];
-			GlobalColorMap[n].g = img[pos++];
-			GlobalColorMap[n].b = img[pos++];
-		}
-	}
-	else	// GIF standard says to provide an internal default Palette:
-	{
-		for(int n = 0; n < 256; n++)
-			GlobalColorMap[n].r = GlobalColorMap[n].g = GlobalColorMap[n].b = n;
-	}
-
-	int GraphicExtensionFound = 0;
-
-	GIFGCEtag GifGCE;
-	memset(&GifGCE, 0, sizeof(GIFGCEtag));
-
-	do
-	{
-		int charGot = img[pos++];
-
-		if (charGot == 0x21)
-		{
-			switch (img[pos++])
-			{
-				case 0xF9:
-					memcpy(&GifGCE, &img[pos], sizeof(GIFGCEtag));
-					GifGCE.Delay = le16(GifGCE.Delay);
-					pos += sizeof(GIFGCEtag)+1; // Block Terminator (always 0)
-					GraphicExtensionFound++;
-					break;
-				case 0xFE:
-				case 0x01:
-				case 0xFF:
-				default:
-					// read (and ignore) data sub-blocks
-					while(int BlockLength = img[pos++])
-					{
-						for (int n = 0; n < BlockLength; n++)
-							++pos;
-					}
-					break;
-			}
-		}
-		else if (charGot == 0x2c)
-		{
-			GifFrame NextImage;
-			GIFIDtag GifID;
-			memcpy(&GifID, &img[pos], sizeof(GIFIDtag));
-			pos += sizeof(GIFIDtag);
-
-			GifID.xPos = le16(GifID.xPos);
-			GifID.yPos = le16(GifID.yPos);
-			GifID.Width = le16(GifID.Width);
-			GifID.Height = le16(GifID.Height);
-
-			NextImage.offsetx = GifID.xPos;
-			NextImage.offsety = GifID.yPos;
-			NextImage.width = ALIGN(GifID.Width);
-			NextImage.height = ALIGN(GifID.Height);
-			NextImage.Delay = GifGCE.Delay;
-			NextImage.Disposal = (GifGCE.PackedFields & 0x1c) >> 2;
-			NextImage.Transparent = (GifID.PackedFields & 0x01) != 0;
-			NextImage.image = NULL;
-
-			int LocalColorMap = (GifID.PackedFields & 0x08)? 1 : 0;
-			int BPP = LocalColorMap ? (GifID.PackedFields & 7) + 1 : GlobalBPP;
-			int BytesPerRow = GifID.Width;
-			if(BPP == 24)
-				BytesPerRow *= 3;
-
-			BytesPerRow = ALIGN(BytesPerRow);
-
-			u8 * Raster = new (std::nothrow) u8 [BytesPerRow*GifID.Height];
-			if(!Raster)
-			{
-				ShowError(tr("Not enough memory."));
-				break;
-			}
-
-			bool Transparent = false;
-			int Transparency = -1;
-			if (GraphicExtensionFound)
-			{
-				Transparent = (GifGCE.PackedFields & 0x01) ? true : false;
-				Transparency = Transparent ? GifGCE.Transparent : -1;
-			}
-
-			GIFCOLOR * CurrentColorMap = new (std::nothrow) GIFCOLOR[sizeof(GIFCOLOR)*(1<<BPP)];
-			if(!CurrentColorMap)
-			{
-				delete [] Raster;
-				ShowError(tr("Not enough memory."));
-				break;
-			}
-
-			if (LocalColorMap)
-			{
-				memcpy(CurrentColorMap, &img[pos], sizeof(GIFCOLOR)*(1<<BPP));
-				pos += (sizeof(GIFCOLOR)-1)*(1 << BPP);
-			}
-			else
-			{
-				memcpy(CurrentColorMap, GlobalColorMap, sizeof(GIFCOLOR)*(1<<BPP));
-			}
-
-			short firstbyte = img[pos++];	// 1st byte of img block (CodeSize)
-
-			// Calculate compressed image block size
-			long ImgStart,ImgEnd;
-			ImgEnd = ImgStart = pos;
-			while(int n = img[pos++])
-			{
-				ImgEnd += n+1;
-				pos = ImgEnd;
-			}
-			pos = ImgStart;
-
-			char * pCompressedImage = new  (std::nothrow) char [ImgEnd-ImgStart+4];
-			if(!pCompressedImage)
-			{
-				delete [] Raster;
-				delete [] CurrentColorMap;
-				ShowError(tr("Not enough memory."));
-				break;
-			}
-
-			char * pTemp = pCompressedImage;
-			while (int nBlockLength = img[pos++])
-			{
-				memcpy(pTemp, &img[pos], nBlockLength);
-				pos += nBlockLength;
-				pTemp+=nBlockLength;
-			}
-
-			int ret = LZWDecoder(pCompressedImage, (char *) Raster, firstbyte, BytesPerRow, GifID.Width,
-							   GifID.Height, ((GifID.PackedFields & 0x40)?1:0));
-
-			if (ret)
-			{
-				int len =  datasizeRGBA8(NextImage.width, NextImage.height);
-
-				NextImage.image = (u8 *) memalign(32, len);
-
-				if(!NextImage.image)
-				{
-					delete [] pCompressedImage;
-					delete [] Raster;
-					delete [] CurrentColorMap;
-					ShowError(tr("Not enough memory."));
-					break;
-				}
-
-				u32 offset;
-				u8 r, g, b;
-
-				for(int x = 0; x < NextImage.width; ++x)
-				{
-					for(int y = 0; y < NextImage.height; ++y)
-					{
-						offset = coordsRGBA8(x, y, NextImage.width);
-
-						if(x < GifID.Width && y < GifID.Height)
-						{
-							if(BPP == 24)
-							{
-								u32 * pixel = (u32 *) &Raster[y*BytesPerRow+x*3];
-								b = (*pixel & 0x00FF0000) >> 16;
-								g = (*pixel & 0x0000FF00) >> 8;
-								r = (*pixel & 0x000000FF);
-							}
-							else
-							{
-								b = Raster[y*BytesPerRow+x];
-								g = Raster[y*BytesPerRow+x];
-								r = Raster[y*BytesPerRow+x];
-							}
-
-							if(r == Transparency || g == Transparency || b == Transparency)
-							{
-								NextImage.image[offset] = 0;
-								NextImage.image[offset+1] = 255;
-								NextImage.image[offset+32] = 255;
-								NextImage.image[offset+33] = 255;
-							}
-							else
-							{
-								NextImage.image[offset] = 255;
-								NextImage.image[offset+1] = CurrentColorMap[r].r;
-								NextImage.image[offset+32] = CurrentColorMap[g].g;
-								NextImage.image[offset+33] = CurrentColorMap[b].b;
-							}
-						}
-						else
-						{
-							NextImage.image[offset] = 0;
-							NextImage.image[offset+1] = 255;
-							NextImage.image[offset+32] = 255;
-							NextImage.image[offset+33] = 255;
-						}
-					}
-				}
-				DCFlushRange(NextImage.image, len);
-
-				Frames.push_back(NextImage);
-			}
-
-			delete [] pCompressedImage;
-			GraphicExtensionFound = 0;
-			delete [] Raster;
-			delete [] CurrentColorMap;
-		}
-		else if (charGot == 0x3b)
-			break; // Ok. Standard End.
-	}
-	while (pos < imgSize);
-
-	delete [] GlobalColorMap;
-
+    size_t end=pos,total=0;
+    while(end<size) {
+        unsigned n=img[end++];
+        if(!n) {
+            if(data) {
+                // Include the old allocation during reserve's replacement.
+                size_t old=data->capacity();
+                if(old>budget || (total>old && total>budget-old)) return false;
+                data->clear();data->reserve(total);
+                if(data->capacity()>budget) return false;
+                while(pos<end-1) { unsigned block=img[pos++];data->insert(data->end(),img+pos,img+pos+block);pos+=block; }
+            }
+            pos=end;return true;
+        }
+        if(n>size-end || (data && (total>budget || n>budget-total))) return false;
+        total+=n;end+=n;
+    }
+    return false;
+}
+void GifImage::ClearFrames()
+{
+    for(size_t i=0;i<Frames.size();++i) {
+        WX_MEMORY_FREE(GPU,WX_MEM_GIF_FRAME,Frames[i].image,datasizeRGBA8(Frames[i].width,Frames[i].height));
+        free(Frames[i].image);
+    }
+    Frames.clear();MainWidth=MainHeight=0;currentFrame=0;lastTimer=0;
+}
+void GifImage::LoadImage(const u8 *img,int imgSize)
+{
+    ClearFrames();
+    if(!img || imgSize<13 || (memcmp(img,"GIF87a",6) && memcmp(img,"GIF89a",6))) return;
+    size_t size=imgSize,pos=13;
+    MainWidth=GifLE16(img+6);MainHeight=GifLE16(img+8);
+    if(!MainWidth || !MainHeight || MainWidth>1024 || MainHeight>1024) { ClearFrames();return; }
+    GIFCOLOR global[256]={};
+    unsigned globalCount=1u<<((img[10]&7)+1);
+    if(img[10]&0x80) {
+        if(3*globalCount>size-pos) { ClearFrames();return; }
+        for(unsigned i=0;i<globalCount;++i) {global[i].r=img[pos++];global[i].g=img[pos++];global[i].b=img[pos++];}
+    } else {
+        globalCount=256;
+        for(unsigned i=0;i<256;++i) global[i].r=global[i].g=global[i].b=i;
+    }
+    // Conservative decoded/workspace allowance; checked allocation still decides.
+    const u64 available=(u64)mallinfo().fordblks+MEM2_freesize();
+    const size_t budget=(size_t)std::min<u64>(16u*1024u*1024u,available/2);
+    size_t used=0;
+    unsigned delay=0,disposal=0;int transparent=-1;
+    bool complete=false;
+    std::vector<u8> compressed;
+    std::unique_ptr<u8[]> raster;
+    size_t rasterCapacity=0;
+    std::unique_ptr<GifLzwTables> table(new(std::nothrow) GifLzwTables);
+    WX_MEMORY_BUFFER(CPU,WX_MEM_GIF_WORKSPACE,table.get(),sizeof(GifLzwTables));
+    if(!table) { ClearFrames();return; }
+    try {
+        while(pos<size) {
+            unsigned tag=img[pos++];
+            if(tag==0x3b) { complete=true;break; }
+            if(tag==0x21) {
+                if(pos>=size) break;
+                unsigned kind=img[pos++];
+                if(kind==0xf9) {
+                    if(size-pos<6 || img[pos]!=4 || img[pos+5]!=0) break;
+                    unsigned flags=img[pos+1];delay=GifLE16(img+pos+2);disposal=(flags>>2)&7;
+                    transparent=(flags&1) ? img[pos+4] : -1;pos+=6;
+                } else if(!GifBlocks(img,size,pos,NULL,0)) break;
+                continue;
+            }
+            if(tag!=0x2c || size-pos<9 || Frames.size()>=4096) break;
+            GifFrame frame={};
+            frame.offsetx=GifLE16(img+pos);frame.offsety=GifLE16(img+pos+2);
+            unsigned w=GifLE16(img+pos+4),h=GifLE16(img+pos+6),flags=img[pos+8];pos+=9;
+            if(!w || !h || w>(unsigned)MainWidth || h>(unsigned)MainHeight ||
+               (unsigned)frame.offsetx>(unsigned)MainWidth-w || (unsigned)frame.offsety>(unsigned)MainHeight-h) break;
+            frame.width=ALIGN(w);frame.height=ALIGN(h);frame.Delay=delay;frame.Disposal=disposal;frame.Transparent=transparent>=0;
+            GIFCOLOR palette[256];unsigned colors=globalCount;memcpy(palette,global,sizeof(palette));
+            if(flags&0x80) {
+                colors=1u<<((flags&7)+1);if(3*colors>size-pos) break;
+                for(unsigned i=0;i<colors;++i) {palette[i].r=img[pos++];palette[i].g=img[pos++];palette[i].b=img[pos++];}
+            }
+            if(pos>=size) break;
+            unsigned initial=img[pos++];
+            const size_t frameBytes=datasizeRGBA8(frame.width,frame.height),rasterBytes=(size_t)frame.width*h;
+            size_t nextCapacity=Frames.capacity();
+            if(Frames.size()==nextCapacity) nextCapacity=std::min<size_t>(4096,std::max<size_t>(1,nextCapacity*2));
+            size_t metadata=(nextCapacity+(nextCapacity>Frames.capacity() ? Frames.capacity() : 0))*sizeof(GifFrame);
+            size_t fixed=frameBytes+metadata+sizeof(GifLzwTables)+std::max(rasterBytes,rasterCapacity);
+            if(used>budget || fixed>budget-used) break;
+            if(!GifBlocks(img,size,pos,&compressed,budget-used-fixed)) break;
+            if(rasterBytes>rasterCapacity) {
+                if(rasterCapacity>budget-used-fixed-compressed.capacity()) break;
+                std::unique_ptr<u8[]> next(new(std::nothrow) u8[rasterBytes]);
+                if(!next) break;
+                raster.swap(next);rasterCapacity=rasterBytes;
+            }
+            if(!LZWDecoder(compressed.data(),compressed.size(),raster.get(),initial,frame.width,w,h,(flags&0x40)!=0,*table)) break;
+            frame.image=(u8*)memalign(32,frameBytes);
+            WX_MEMORY_ALLOC(GPU,WX_MEM_GIF_FRAME,frame.image,frameBytes);
+            if(!frame.image) break;
+            bool okay=true;
+            for(unsigned y=0;y<(unsigned)frame.height;++y) for(unsigned x=0;x<(unsigned)frame.width;++x) {
+                u32 offset=coordsRGBA8(x,y,frame.width);unsigned index=x<w && y<h ? raster[y*frame.width+x] : 0;
+                if(x<w && y<h && index>=colors) okay=false;
+                frame.image[offset]=(x<w && y<h && (int)index!=transparent) ? 255 : 0;
+                frame.image[offset+1]=palette[index].r;frame.image[offset+32]=palette[index].g;frame.image[offset+33]=palette[index].b;
+            }
+            if(!okay) { WX_MEMORY_FREE(GPU,WX_MEM_GIF_FRAME,frame.image,frameBytes);free(frame.image);break; }
+            DCFlushRange(frame.image,frameBytes);
+            try { Frames.reserve(nextCapacity);Frames.push_back(frame); }
+            catch(const std::bad_alloc &) { WX_MEMORY_FREE(GPU,WX_MEM_GIF_FRAME,frame.image,frameBytes);free(frame.image);throw; }
+            used+=frameBytes;delay=disposal=0;transparent=-1;
+        }
+    } catch(const std::bad_alloc &) {}
+    if(!complete) ClearFrames();
 }
 
 void GifImage::Draw(int x, int y, int z, int degrees, float scaleX, float scaleY, int alpha, int minwidth, int maxwidth, int minheight, int maxheight)

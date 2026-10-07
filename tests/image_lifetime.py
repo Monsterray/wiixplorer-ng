@@ -23,7 +23,7 @@ CODEC(gdImageCreateFromJpegPtr) CODEC(gdImageCreateFromTiffPtr) CODEC(gdImageCre
 CODEC(gdImageCreateFromGifPtr) CODEC(gdImageCreateFromGdPtr) CODEC(gdImageCreateFromGd2Ptr) CODEC(gdImageCreateFromTgaPtr)
 void gdImageDestroy(gdImagePtr p){delete p;}
 u8 *GDImageToRGBA8(gdImagePtr*,int*w,int*h){*w=4;*h=4;return (u8*)malloc(64);}
-struct GifImage{static int live;GifImage(const u8*,int){++live;}~GifImage(){--live;}int GetFrameCount(){return 2;}};int GifImage::live=0;
+struct GifImage{static int live;GifImage(const u8*,int){++live;}~GifImage(){--live;}int GetFrameCount(){return 2;}int GetWidth(){return 4;}int GetHeight(){return 4;}};int GifImage::live=0;
 struct TplImage{TplImage(const u8*,int){}int GetWidth(int){return 4;}int GetHeight(int){return 4;}int GetFormat(int){return 6;}const u8*GetTextureBuffer(int){static u8 pixels[64]={};return pixels;}int GetTextureSize(int){return 64;}};
 class GuiImageData{public:GuiImageData();GuiImageData(const u8*,int);~GuiImageData();void LoadImage(const u8*,int);void LoadTPL(const u8*,int);u8*data;GifImage*AnimGif;int width,height;u8 format;
 #if WX_PROBE_LEVEL>0

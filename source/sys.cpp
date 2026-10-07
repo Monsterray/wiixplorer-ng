@@ -108,10 +108,10 @@ extern "C" void ExitApp()
     Application::DestroyInstance();
     Resources::DestroyInstance();
     SoundHandler::DestroyInstance();
+    ClearFontData(); // Font owners are included in the final mounted-SD report.
     WX_MEMORY_SNAPSHOT("shutdown_released");
     wx_probe_flush();
     DeviceHandler::DestroyInstance();
-	ClearFontData();
 	DI2_Close();
 	USB_Deinitialize();
 	ShutdownPads();

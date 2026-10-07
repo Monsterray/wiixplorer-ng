@@ -114,11 +114,12 @@ void GuiImageData::LoadImage(const u8 *img, int imgSize)
 	{
 		// IMAGE_GIF
 		AnimGif = new GifImage(img, imgSize);
-		if(AnimGif->GetFrameCount() > 1)
-			return;
+		int frames=AnimGif->GetFrameCount();
+		if(frames>1) { width=AnimGif->GetWidth(); height=AnimGif->GetHeight(); return; }
 
 		delete AnimGif;
 		AnimGif = NULL;
+		if(!frames) return; // Invalid/budget-rejected GIFs do not bypass the bounded parser.
 
 		gdImg = gdImageCreateFromGifPtr(imgSize, (u8*) img);
 	}

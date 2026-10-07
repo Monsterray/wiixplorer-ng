@@ -29,6 +29,8 @@
 #include <string.h>
 #include <wiiuse/wpad.h>
 #include <malloc.h>
+#include <limits.h>
+#include "Diagnostics/MemoryProbes.h"
 
 #include "filebrowser.h"
 #include "FileStartUp/FileStartUp.h"
@@ -39,6 +41,13 @@
 /****************************************************************************
  * FileBrowser Class to parse directories on the fly
  ***************************************************************************/
+static void BrowserFreeNames(BROWSERENTRY *entries,int count)
+{
+    for(int i=0;i<count;++i) {
+        WX_MEMORY_FREE(IO,WX_MEM_DIR_PATH,entries[i].filename,entries[i].filename ? strlen(entries[i].filename)+1 : 0);
+        delete [] entries[i].filename;
+    }
+}
 FileBrowser::FileBrowser()
 	: CThread(70, 65536)
 {
@@ -66,11 +75,12 @@ FileBrowser::~FileBrowser()
 {
 	exit_Requested = true;
 	shutdownThread();
-	closedir(dirIter); // close directory
-	for(int i = 0; i < browser.numEntries; ++i)
-		delete [] browserList[i].filename;
-	if(browserList != NULL)
-		free(browserList);
+	if(dirIter) closedir(dirIter); // close directory
+	BrowserFreeNames(browserList,browser.numEntries);
+	if(browserList != NULL) {
+        WX_MEMORY_FREE(IO,WX_MEM_DIR_PATH,browserList,(browser.numEntries+1)*sizeof(BROWSERENTRY));
+        free(browserList);
+    }
 }
 
 /****************************************************************************
@@ -251,21 +261,19 @@ ItemStruct * FileBrowser::GetItemStruct(int pos)
 void FileBrowser::ResetBrowser()
 {
 	Lock();
-	for(int i = 0; i < browser.numEntries; ++i)
-		delete [] browserList[i].filename;
+	BrowserFreeNames(browserList,browser.numEntries);
 
 	// Clear any existing values
 	if(browserList != NULL)
 	{
-		free(browserList);
+		WX_MEMORY_FREE(IO,WX_MEM_DIR_PATH,browserList,(browser.numEntries+1)*sizeof(BROWSERENTRY));
+        free(browserList);
 		browserList = NULL;
 	}
 
 	browser.numEntries = 0;
 
-	// set aside space for 1 entry
-	browserList = (BROWSERENTRY *)malloc(sizeof(BROWSERENTRY));
-	memset(browserList, 0, sizeof(BROWSERENTRY));
+	// Empty lists need no allocation; realloc(NULL, ...) handles the first batch.
 	Unlock();
 }
 
@@ -283,15 +291,15 @@ static int FileSortCallback(const void *file1, const void *file2)
 	const BROWSERENTRY *f1 = (const BROWSERENTRY *) file1;
 	const BROWSERENTRY *f2 = (const BROWSERENTRY *) file2;
 
-	if(!f1 || !f1->filename)  { return 1; }
-	if(!f2 || !f2->filename)  { return -1; }
+	bool first=f1 && f1->filename,second=f2 && f2->filename;
+    if(!first || !second) return first ? -1 : second ? 1 : 0;
 
 	/* Special case for implicit directories */
 	if(f1->filename[0] == '.' || f2->filename[0] == '.')
 	{
-		if(strcmp(f1->filename, ".") == 0) { return -1; }
+		if(strcmp(f1->filename, ".") == 0) { return strcmp(f2->filename,".")==0 ? 0 : -1; }
 		if(strcmp(f2->filename, ".") == 0) { return 1; }
-		if(strcmp(f1->filename, "..") == 0) { return -1; }
+		if(strcmp(f1->filename, "..") == 0) { return strcmp(f2->filename,"..")==0 ? 0 : -1; }
 		if(strcmp(f2->filename, "..") == 0) { return 1; }
 	}
 
@@ -317,11 +325,12 @@ bool FileBrowser::ParseDirEntries()
 
 	struct dirent *dirent = 0;
 	int nameLength, fileCount = 0;
+    bool allocationFailed=false;
 
 	BROWSERENTRY *tmpBrowser = (BROWSERENTRY *) malloc(MAX_PARSE_ITEMS * sizeof(BROWSERENTRY));
-	if(!tmpBrowser) // failed to allocate required memory
+	WX_MEMORY_BUFFER(IO,WX_MEM_DIR_PATH,tmpBrowser,MAX_PARSE_ITEMS*sizeof(BROWSERENTRY));
+    if(!tmpBrowser) // failed to allocate required memory
 	{
-		ResetBrowser();
 		ThrowMsg(tr("Out of memory: too many files!"), 0 , tr("OK"));
 		return false;
 	}
@@ -353,7 +362,8 @@ bool FileBrowser::ParseDirEntries()
 				continue;
 		}
 
-		snprintf(filename, MAXPATHLEN, "%s%s/%s", browser.rootdir, browser.dir, dirent->d_name);
+		int joined=snprintf(filename,MAXPATHLEN,"%s%s/%s",browser.rootdir,browser.dir,dirent->d_name);
+        if(joined<0 || joined>=MAXPATHLEN) continue;
 
 		if(strcmp(dirent->d_name,"..") == 0) {
 			filestat.st_mode = S_IFDIR;
@@ -370,11 +380,12 @@ bool FileBrowser::ParseDirEntries()
 			continue;
 
 		nameLength = strlen(dirent->d_name)+1;
-		if(nameLength > 255)
-			nameLength = 255;
+		if(nameLength>MAXJOLIET+1) continue;
 
 		tmpBrowser[fileCount].filename = new (std::nothrow) char[nameLength];
-		if(tmpBrowser[fileCount].filename) {
+        WX_MEMORY_ALLOC(IO,WX_MEM_DIR_PATH,tmpBrowser[fileCount].filename,nameLength);
+		if(!tmpBrowser[fileCount].filename) { allocationFailed=true;break; }
+        if(tmpBrowser[fileCount].filename) {
 			strncpy(tmpBrowser[fileCount].filename, dirent->d_name, nameLength);
 			tmpBrowser[fileCount].filename[nameLength-1] = 0;
 		}
@@ -389,16 +400,22 @@ bool FileBrowser::ParseDirEntries()
 	if(!directoryChange && fileCount > 0)
 	{
 		Lock();
-		BROWSERENTRY * newBrowserList = (BROWSERENTRY *)realloc(browserList, (browser.numEntries+fileCount+1) * sizeof(BROWSERENTRY));
+#if WX_PROBE_LEVEL>0
+        const uintptr_t oldAddress=(uintptr_t)browserList;
+        const size_t oldBytes=browserList ? (browser.numEntries+1)*sizeof(BROWSERENTRY) : 0;
+#endif
+        bool representable=browser.numEntries>=0 && browser.numEntries<=INT_MAX/(int)sizeof(BROWSERENTRY)-fileCount-1;
+        BROWSERENTRY *newBrowserList=representable ? (BROWSERENTRY*)realloc(browserList,(browser.numEntries+fileCount+1)*sizeof(BROWSERENTRY)) : NULL;
+        WX_MEMORY_ALLOC(IO,WX_MEM_DIR_PATH,newBrowserList,representable ? (browser.numEntries+fileCount+1)*sizeof(BROWSERENTRY) : 0);
 		if(!newBrowserList) // failed to allocate required memory
 		{
-			for(int i = 0; i < fileCount; ++i)
-				delete [] tmpBrowser[i].filename;
-			ThrowMsg(tr("Out of memory: too many files!"), 0 , tr("OK"));
+			BrowserFreeNames(tmpBrowser,fileCount);
+            allocationFailed=true;
 		}
 		else
 		{
-			browserList = newBrowserList;
+			WX_MEMORY_FREE(IO,WX_MEM_DIR_PATH,(const void*)oldAddress,oldBytes);
+            browserList = newBrowserList;
 			memcpy(&browserList[browser.numEntries], tmpBrowser, fileCount * sizeof(BROWSERENTRY));
 			qsort(browserList, browser.numEntries+fileCount, sizeof(BROWSERENTRY), FileSortCallback);
 			browser.numEntries += fileCount;	//make sure reload is after the sort
@@ -407,15 +424,15 @@ bool FileBrowser::ParseDirEntries()
 		bChanged = true;
 	}
 	else {
-		for(int i = 0; i < fileCount; ++i)
-			delete [] tmpBrowser[i].filename;
+		BrowserFreeNames(tmpBrowser,fileCount);
 	}
 
 	free(tmpBrowser);
+    if(allocationFailed) ThrowMsg(tr("Out of memory: too many files!"),0,tr("OK"));
 
-	if(!dirent || directoryChange)
+	if(!dirent || directoryChange || allocationFailed)
 	{
-		closedir(dirIter); // close directory
+		if(dirIter) closedir(dirIter); // close directory
 		dirIter = NULL;
 		return false; // no more entries
 	}

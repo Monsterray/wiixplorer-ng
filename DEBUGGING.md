@@ -596,3 +596,32 @@ integrity errors and zero tracked live bytes after teardown, and saves the
 final report in the profile. Native smoke captures/restores this report along
 with existing settings/probes. Always submit its exact Dolphin-passed artifact
 through the shared Wii dev queue. Timing from Dolphin is not drive bandwidth.
+
+## Reusable benchmark validation and HDMI capture
+
+Run `python3 scripts/validate-bench.py media --hardware` (also `copy`, `memory`
+or `archive`). It builds level-3 debug, freezes an isolated DOL, runs HBC smoke
+and guest/core/probe checks in Dolphin, then submits that same artifact through
+the shared dev-Wii queue and waits for the job result. `--skip-build` uses an
+already-built debug DOL. Failure logs and `result.json` remain under ignored
+`build/validation-*`; hardware is never queued after an emulator failure.
+The fixed HBC-port preflight waits up to 300 seconds for another local listener
+without sending anything to its agent; `--wait-port 0..3600` sets that bound. Cleanup targets the exact owned Dolphin profile. Hardware wait logs retain up to
+200 lines, including artifact paths and the final result. Runner regression
+coverage checks emulator and hardware failures plus cleanup failure reporting.
+
+On macOS, `--capture-device DEVICE_ID` additionally builds the native AVFoundation
+helper at stable `build/tools/wii-capture` and records at most one JPEG per second
+for at most 600 seconds during the leased job. Identify devices with
+`build/tools/wii-capture --list`; choose the HDMI dongle, not the built-in camera.
+The current workstation reports UGREEN 15389 (`0x146000002b895389`). Capture
+never records audio, opens a server or runs beyond the job cleanup. Camera
+privacy must already be authorized; unattended jobs fail with a saved log
+instead of opening a permission prompt. Captures live in `build/wii.*/video`. These one-second samples can show a
+stuck screen, but cannot establish that single-frame flicker is absent. The
+helper currently reports camera access as not yet authorized on this workstation.
+
+Host FTP regressions bind control/data and occupied-port fixtures to loopback.
+They need no LAN listener or persistent firewall exception. Native debug stdout
+capture (`hbc-smoke.py --capture-log`) remains explicitly opt-in because it
+requires an inbound LAN listener; normal benchmark runs do not start it.

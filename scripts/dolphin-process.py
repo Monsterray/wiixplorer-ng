@@ -70,9 +70,13 @@ def main():
         stop(prefix, timed=True)
         sys.exit(0)
     if args.status or args.stop or args.force_stop:
-        if previous:
-            if args.status: print(json.dumps({'profile':previous['profile'], 'pids':processes(previous['profile'])}))
-            else: stop(previous['profile'], args.force_stop)
+        if args.profile and (Path(args.profile).resolve().parent != root/'build' or not Path(args.profile).name.startswith('dolphin.')):
+            parser.error('Explicit stop requires a private project Dolphin profile')
+        if args.status:
+            if previous: print(json.dumps({'profile':previous['profile'], 'pids':processes(previous['profile'])}))
+            else: print('No tracked Dolphin instance.')
+        elif args.profile or previous:
+            stop(args.profile or previous['profile'], args.force_stop)
         else: print('No tracked Dolphin instance.')
         sys.exit(0)
     if processes(prefix): sys.exit('A project Dolphin run is still open. Use scripts/dolphin.sh --stop first.')

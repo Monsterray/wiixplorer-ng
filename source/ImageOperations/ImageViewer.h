@@ -20,6 +20,7 @@
 
 #include "GUI/gui.h"
 #include "Controls/CThread.h"
+#include <atomic>
 #include "FileOperations/DirListAsync.h"
 #include "Controls/CMutex.h"
 
@@ -28,7 +29,7 @@ class ImageViewer : public GuiFrame, public CThread, public sigslot::has_slots<>
 	public:
 		//!Constructor
 		//!\param path Path from where to load the filelist of all images or the image itself
-		ImageViewer(const char *filepath);
+		ImageViewer(const char *filepath, bool startWorker = true);
 		//!Destructor
 		~ImageViewer();
 		//!Zoom into the image (currently 20% till a limit of screenwidth or screenheight)
@@ -85,7 +86,9 @@ class ImageViewer : public GuiFrame, public CThread, public sigslot::has_slots<>
 		int rotateRight;
 		int rotateLeft;
 		bool isPointerVisible;
-		bool bExitRequested;
+		std::atomic<bool> bExitRequested;
+        std::atomic<bool> workerFinished;
+        bool deleteQueued;
 		bool isAButtonPressed[4];
 		bool updateAlpha;
 		bool bSlideShowFadeStart;
@@ -109,7 +112,7 @@ class ImageViewer : public GuiFrame, public CThread, public sigslot::has_slots<>
 
 		GuiImage * image;
 		GuiImageData *imageData;
-		GuiImageData *newImageData;
+		std::atomic<GuiImageData *> newImageData;
 
 		GuiImageData * nextButtonData;
 		GuiImageData * nextButtonOverData;

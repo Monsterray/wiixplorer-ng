@@ -20,6 +20,7 @@ import ftplib
 import io
 import secrets
 import threading
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
@@ -28,8 +29,10 @@ mode.add_argument('--profile', type=Path, help='active isolated Dolphin profile'
 mode.add_argument('--hardware', action='store_true', help='only inside a wii-bench job')
 parser.add_argument('--ftp-port', type=int, help='override the FTP fixture port (default Wii 21, Dolphin 2121)')
 parser.add_argument('--ftp-smoke', action='store_true', help='temporary authenticated FTP server roundtrip, append/resume, idle timeout and exit')
+parser.add_argument('--capture-device', help='macOS HDMI device ID; leased hardware jobs only, no camera prompts')
 parser.add_argument('--capture-log', action='store_true', help='capture debug stdout through HBC-Reborn on port 4300 when no log target is already set')
 parser.add_argument('--archive-device', choices=['sd','usb1'], help='native production archive fixtures on an isolated test directory')
+parser.add_argument('--media-bench', action='store_true', help='debug-only native media parser/buffer safety validation')
 parser.add_argument('--memory-bench', action='store_true', help='debug-only native MEM1/MEM2/locked-cache benchmark')
 parser.add_argument('--storage-device', choices=['sd']+['usb'+str(i) for i in range(1,9)], help='debug-only native storage read/write/copy benchmark')
 parser.add_argument('--copy-bench', action='store_true', help='debug-only on-device copy buffer comparison')
@@ -46,10 +49,11 @@ spec = importlib.util.spec_from_file_location('hbc_client', client)
 hbc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hbc)
 
+if a.capture_device and not a.hardware: parser.error('HDMI capture requires a queued hardware job')
 if a.storage_device and a.storage_device!='sd' and not a.hardware: parser.error('Dolphin does not validate physical USB mounts')
 if a.archive_device=='usb1' and not a.hardware: parser.error('Dolphin does not validate physical USB mounts')
 # Dolphin executes memory operations for correctness; its timings are not hardware speeds.
-if sum(bool(x) for x in (a.memory_bench,a.storage_device,a.copy_bench,a.archive_device))>1: parser.error('Choose one benchmark')
+if sum(bool(x) for x in (a.memory_bench,a.storage_device,a.copy_bench,a.archive_device,a.media_bench))>1: parser.error('Choose one benchmark')
 
 if a.hardware:
     if not os.environ.get('WII_BENCH_JOB_START') or not os.environ.get('WII_BENCH_IP'):
@@ -95,6 +99,7 @@ ftp_connection = ftp_data = None
 ftp_devices = []
 copy_owned = False
 log_server = None
+capture_process = capture_log = None
 archive_directory='sd:/wiixplorer-archive-'+profile.name
 archive_usb_directory='usb1:/wiixplorer-archive-'+profile.name
 # HBC's USB service is avoided; the app copies/validates/cleans its USB fixtures.
@@ -104,6 +109,13 @@ archive_cleanup=set()
 backups = {}
 created_dirs = []
 try:
+    if a.capture_device:
+        helper=ROOT/'build/tools/wii-capture'
+        if not helper.exists(): raise RuntimeError('Build the HDMI capture helper before queuing the job')
+        capture_log=(profile/'capture.log').open('w')
+        capture_process=subprocess.Popen([str(helper),a.capture_device,str(profile/'video'),'600'],stdout=capture_log,stderr=subprocess.STDOUT)
+        time.sleep(1)
+        if capture_process.poll() is not None: raise RuntimeError('HDMI capture did not start; see capture.log (no privacy prompt was opened)')
     if a.hardware:
         # Restore every file the app's settings/probes can replace. No temp cleanup.
         for directory in ('sd:/apps', 'sd:/apps/WiiXplorer'):
@@ -126,14 +138,15 @@ try:
             encoded=bytes(ord(c)^ord('WiiXplorer'[i%10]) for i,c in enumerate(ftp_password)).hex()
             config+=('FTPServer.AutoStart = 1\nFTPServer.User = wiixplorer-test\nFTPServer.IdleTimeout = 30\nFTPServer.Port = '+str(ftp_port)+'\nFTPServer.CPassword = '+encoded+'\n').encode()
         hbc.put_file(address,'sd:/apps/WiiXplorer/WiiXplorer.cfg',config)
-        arguments=['--smoke-frames='+('36000' if a.transfer_bench or a.copy_bench or a.storage_device or a.memory_bench or a.archive_device or a.ftp_smoke else '3600')]
-        if a.copy_bench or a.storage_device or a.memory_bench:
+        arguments=['--smoke-frames='+('36000' if a.transfer_bench or a.copy_bench or a.storage_device or a.memory_bench or a.media_bench or a.archive_device or a.ftp_smoke else '3600')]
+        if a.copy_bench or a.storage_device or a.memory_bench or a.media_bench:
             try: hbc.file_request(address,'L',copy_directory+'/')
             except hbc.HBCError as error:
                 if error.code != hbc.ENOENT: raise
             else: raise RuntimeError('Copy benchmark directory already exists')
             copy_owned=True
-            if a.memory_bench: arguments.append('--memory-bench='+copy_directory)
+            if a.media_bench: arguments.append('--media-bench='+copy_directory)
+            elif a.memory_bench: arguments.append('--memory-bench='+copy_directory)
             elif a.storage_device:
                 arguments+=['--storage-bench='+storage_directory,'--storage-report='+copy_directory]
             else: arguments.append('--copy-bench='+copy_directory)
@@ -166,7 +179,7 @@ try:
             threading.Thread(target=log_server.serve,args=(True,),daemon=True).start()
         hbc.send(address,str(artifacts/'boot.dol'),arguments)
     print('HBC smoke artifacts:', profile, flush=True)
-    deadline = time.monotonic()+(300 if a.memory_bench else 30)
+    deadline = time.monotonic()+(300 if a.memory_bench or a.media_bench else 30)
     while True:
         try:
             status = hbc.status(address)
@@ -178,6 +191,25 @@ try:
     (profile/'hbc-status.json').write_text(json.dumps(status,indent=2))
     if a.hardware: hbc.foreign_app_check(address)
 
+    if a.media_bench:
+        deadline=time.monotonic()+180
+        while True:
+            try:
+                complete=hbc.get_file(address,copy_directory+'/media-complete')
+                report=hbc.get_file(address,copy_directory+'/media-results.csv')
+                (profile/'media-results.csv').write_bytes(report)
+                if complete!=b'1': raise RuntimeError('Native media validation failed; see media-results.csv')
+                break
+            except (OSError,hbc.HBCError): pass
+            if time.monotonic()>deadline: raise RuntimeError('Media validation incomplete')
+            time.sleep(1)
+        rows=list(csv.DictReader(report.decode().splitlines()))
+        if len(rows)!=7 or any(r['verified']!='1' for r in rows): raise RuntimeError('Media validation report failed')
+        (profile/'media-results.csv').write_bytes(report)
+        for name in ('media-results.csv','media-complete'):
+            hbc.file_request(address,'D',copy_directory+'/'+name)
+        hbc.file_request(address,'D',copy_directory)
+        print('Native media: seven production parser/buffer/render groups passed',flush=True)
     def shot(name):
         w,h,pixels = hbc.screen(address)
         if w < 320 or h < 200: raise RuntimeError('Invalid framebuffer dimensions')
@@ -244,6 +276,27 @@ try:
         (profile/'memory-benchmark.csv').write_bytes(report)
         capacity=hbc.get_file(address,copy_directory+'/memory-capacity.csv')
         (profile/'memory-capacity.csv').write_bytes(capacity)
+        working=hbc.get_file(address,copy_directory+'/memory-workingset.csv')
+        (profile/'memory-workingset.csv').write_bytes(working)
+        samples=list(csv.DictReader(working.decode().splitlines()))
+        sizes=(8192,16384,32768,65536,131072,262144,524288,1048576)
+        expected={('copy_crc',src,dst,state,size,0,repeat)
+            for src in ('MEM1','MEM2') for dst in aliases
+            for state in ('cold','reused') for size in sizes for repeat in range(3)}
+        expected|={('read_stride',src,'CPU',state,size,stride,repeat)
+            for src in ('MEM1','MEM2') for state in ('cold','reused')
+            for size in sizes for stride in (4,32,512,4096) for repeat in range(3)}
+        actual={(r['operation'],r['source'],r['destination'],r['cache_state'],
+            int(r['block_bytes']),int(r['stride_bytes']),int(r['repeat'])) for r in samples}
+        if len(samples)!=768 or actual!=expected or any(r['verified']!='1' or int(r['bytes'])!=2097152 or int(r['ticks_us'])<=0 for r in samples):
+            raise RuntimeError('Working-set pipeline/stride report failed verification')
+        summary={}
+        for row in samples:
+            working_key='/'.join(row[field] for field in ('operation','source','destination','cache_state','block_bytes','stride_bytes'))
+            summary.setdefault(working_key,[]).append(int(row['ticks_us']))
+        (profile/'memory-workingset-summary.json').write_text(json.dumps({key:{'median_us':statistics.median(values),'max_us':max(values)} for key,values in summary.items()},indent=2))
+        print('Working-set benchmark: 768 verified copy/CRC and stride rows, 8 KiB–1 MiB; median/max summary saved',flush=True)
+
         if a.hardware: print(capacity.decode().strip(),flush=True)
         hbc.file_request(address,'D',copy_directory+'/memory-capacity.csv')
         groups={}
@@ -255,6 +308,7 @@ try:
         if not a.hardware: print('Dolphin memory correctness: 144 verified operations; emulator timings are not Wii bandwidth',flush=True)
         hbc.file_request(address,'D',copy_directory+'/memory-complete')
         hbc.file_request(address,'D',copy_directory+'/memory-benchmark.csv')
+        hbc.file_request(address,'D',copy_directory+'/memory-workingset.csv')
         hbc.file_request(address,'D',copy_directory)
 
     if a.copy_bench or a.storage_device:
@@ -496,6 +550,11 @@ try:
     (profile/'hbc-smoke.json').write_text(json.dumps(result,indent=2))
     print('Agent overlay, settings/diagnostics buttons, file roundtrip and exit passed',flush=True)
 finally:
+    if capture_process:
+        capture_process.terminate()
+        try: capture_process.wait(timeout=5)
+        except subprocess.TimeoutExpired: capture_process.kill();capture_process.wait(timeout=5)
+    if capture_log: capture_log.close()
     if log_server: log_server.close()
     if ftp_data: ftp_data.close()
     if ftp_connection: ftp_connection.close()
@@ -527,7 +586,7 @@ finally:
             (profile/'after-probes.csv').write_bytes(failure_probes)
         except (OSError,hbc.HBCError): pass
         if copy_owned and a.memory_bench:
-            for name in ('memory-benchmark.csv','memory-complete','memory-capacity.csv'):
+            for name in ('memory-benchmark.csv','memory-workingset.csv','memory-complete','memory-capacity.csv'):
                 try: (profile/('after-'+name)).write_bytes(hbc.get_file(address,copy_directory+'/'+name))
                 except (OSError,hbc.HBCError): pass
         archive_cleanup_errors=[]
@@ -542,7 +601,7 @@ finally:
             except hbc.HBCError as error:
                 if error.code != hbc.ENOENT: archive_cleanup_errors.append(str(error))
         if copy_owned:
-            for suffix in ('/source','/destination','/copy-benchmark.csv','/storage-benchmark.csv','/storage-metadata.csv','/storage-complete','/memory-complete','/memory-benchmark.csv','/memory-capacity.csv',''):
+            for suffix in ('/media.mth','/media.pdf','/media.jpg','/media-results.csv','/media-complete','/source','/destination','/copy-benchmark.csv','/storage-benchmark.csv','/storage-metadata.csv','/storage-complete','/memory-complete','/memory-benchmark.csv','/memory-workingset.csv','/memory-capacity.csv',''):
                 try: hbc.file_request(address,'D',copy_directory+suffix)
                 except hbc.HBCError as error:
                     if error.code != hbc.ENOENT: raise

@@ -21,11 +21,11 @@ while [ "$#" -gt 0 ]; do
         --build) shift; build_config=${1:?debug or release required} ;;
         --gdb-port) shift; gdb_port=${1:?port required} ;;
         --config-seed) shift; config_seed=${1:?configuration file required} ;;
-        --bench) shift; bench=${1:?archive, memory, storage or copy required} ;;
+        --bench) shift; bench=${1:?archive, memory, storage, copy or media required} ;;
         --sd-image) shift; sd_image=${1:?image required} ;;
         --seconds) shift; seconds=${1:?seconds required} ;;
         --status|--stop|--force-stop|--stop-all) exec python3 "$root/scripts/dolphin-process.py" "$1" ;;
-        *) printf 'Usage: %s [--build debug|release] [--prepare-only] [--debug] [--capture] [--seconds N] [--smoke-frames N] [--gdb-port PORT] [--bench archive|memory|storage|copy] [--sd-image PATH] [--config-seed PATH] [--status|--stop|--force-stop|--stop-all]\n' "$0" >&2; exit 2 ;;
+        *) printf 'Usage: %s [--build debug|release] [--prepare-only] [--debug] [--capture] [--seconds N] [--smoke-frames N] [--gdb-port PORT] [--bench archive|memory|storage|copy|media] [--sd-image PATH] [--config-seed PATH] [--status|--stop|--force-stop|--stop-all]\n' "$0" >&2; exit 2 ;;
     esac
     shift
 done
@@ -61,9 +61,9 @@ if [ -n "$bench" ]; then
         archive)
             python3 "$root/scripts/archive-fixtures.py" "$profile/Load/WiiSDSync/wiixplorer-archive-$(basename "$profile")"
             printf '%s\n' "--archive-check=sd:/wiixplorer-archive-$(basename "$profile")" > "$profile/Load/WiiSDSync/apps/WiiXplorer/bench.cfg" ;;
-        memory|storage|copy)
+        memory|storage|copy|media)
             printf '%s\n' "--$bench-bench=sd:/wiixplorer-copy-$(basename "$profile")" > "$profile/Load/WiiSDSync/apps/WiiXplorer/bench.cfg" ;;
-        *) printf 'Bench must be archive, memory, storage or copy.\n' >&2; exit 2 ;;
+        *) printf 'Bench must be archive, memory, storage, copy or media.\n' >&2; exit 2 ;;
     esac
     printf '%s\n' "$bench" > "$profile/bench.txt"
 fi
@@ -92,8 +92,10 @@ revision = subprocess.run(['git', 'describe', '--always', '--dirty', '--tags'],
                           capture_output=True, text=True)
 (folder / 'revision.txt').write_text(revision.stdout.strip() + '\n')
 PY
-printf 'Dolphin profile, frozen build, and logs: %s\n' "$profile"
-if "$prepare_only"; then exit 0; fi
+printed_profile="$profile"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) printed_profile=$(cygpath -w "$profile") ;; esac
+printf 'Dolphin profile, frozen build, and logs: %s\n' "$printed_profile"
+if ! "$prepare_only"; then python3 "$root/scripts/hbc-port.py"; fi
 boot="$profile/artifacts/boot.dol"
 # Native Windows Dolphin expects Windows paths; the devkitPro shell uses POSIX paths.
 case "$(uname -s)" in
@@ -104,6 +106,7 @@ args=(-e "$boot" -u "$profile"
     -C Dolphin.Core.CPUThread=False -C Dolphin.Core.WiiSDCard=True
     -C Dolphin.Core.WiiSDCardAllowWrites=True -C Dolphin.Core.WiiSDCardEnableFolderSync=True
     -C Graphics.Hacks.XFBToTextureEnable=False
+    -C Graphics.Hacks.EFBAccessEnable=True
     -C Dolphin.Interface.UsePanicHandlers=False
     -C Dolphin.Analytics.PermissionAsked=True -C Dolphin.Analytics.Enabled=False
     -C Dolphin.Interface.ConfirmStop=False -C Logger.Options.WriteToFile=True
@@ -121,7 +124,16 @@ if [ "$(uname -s)" = Darwin ]; then args+=(-C "Dolphin.Core.GFXBackend=${DOLPHIN
 elif [ -n "${DOLPHIN_BACKEND:-}" ]; then args+=(-C "Dolphin.Core.GFXBackend=$DOLPHIN_BACKEND"); fi
 if "$capture"; then args+=(-C Dolphin.Movie.DumpFrames=True -C Graphics.Settings.DumpFramesAsImages=True); fi
 if [ "$(uname -s)" = Darwin ] && [ -z "${DOLPHIN_EXE:-}" ]; then
-    python3 "$root/scripts/dolphin-process.py" --seconds "$seconds" "$profile" open -n -a "${DOLPHIN_APP:-/Applications/Dolphin.app}" --args "${args[@]}"
+    launch=(open -n -a "${DOLPHIN_APP:-/Applications/Dolphin.app}" --args "${args[@]}")
 else
-    python3 "$root/scripts/dolphin-process.py" --seconds "$seconds" "$profile" "${DOLPHIN_EXE:-dolphin-emu}" "${args[@]}"
+    launch=("${DOLPHIN_EXE:-dolphin-emu}" "${args[@]}")
 fi
+if "$prepare_only"; then
+    python3 - "$profile" "${launch[@]}" <<'PY_COMMAND'
+import json, sys
+from pathlib import Path
+(Path(sys.argv[1])/'launch-command.json').write_text(json.dumps(sys.argv[2:])+'\n')
+PY_COMMAND
+    exit 0
+fi
+python3 "$root/scripts/dolphin-process.py" --seconds "$seconds" "$profile" "${launch[@]}"

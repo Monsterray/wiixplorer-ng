@@ -587,6 +587,11 @@ u8 * FlipRGBAImage(const u8 *src, u32 width, u32 height)
 
 u8 * RGB8ToRGB565(const u8 *src, u8 *dst, u32 width, u32 height)
 {
+    return RGB8ToRGB565Stride(src,dst,width,height,width*3);
+}
+u8 * RGB8ToRGB565Stride(const u8 *src, u8 *dst, u32 width, u32 height,u32 pitch)
+{
+	if(!src || !dst || !width || !height || width>1024 || height>1024 || pitch<width*3 || pitch>UINT32_MAX/height) return NULL;
 	u32 x, y;
 	u32 x1, y1;
 	u32 iv;
@@ -599,12 +604,11 @@ u8 * RGB8ToRGB565(const u8 *src, u8 *dst, u32 width, u32 height)
 			{
 				for(x = x1; x < (x1 + 4); x++)
 				{
-					if((x >= width) || (y >= height))
-						continue;
+					if(x>=width || y>=height) { ((u16*)dst)[iv++]=0; continue; }
 
-					u8 r = src[(y*width+x)*3] >> 3;
-					u8 g = src[(y*width+x)*3+1] >> 2;
-					u8 b = src[(y*width+x)*3+2] >> 3;
+					u8 r = src[y*pitch+x*3] >> 3;
+					u8 g = src[y*pitch+x*3+1] >> 2;
+					u8 b = src[y*pitch+x*3+2] >> 3;
 
 					*(u16*)(dst + ((iv++) << 1)) = (r << 11) | (g << 5) | (b);
 				}
@@ -612,7 +616,7 @@ u8 * RGB8ToRGB565(const u8 *src, u8 *dst, u32 width, u32 height)
 		}
 	}
 
-	DCFlushRange(dst, (width * height) << 1);
+	DCFlushRange(dst, ALIGN(width)*ALIGN(height)*2);
 
 	return dst;
 }

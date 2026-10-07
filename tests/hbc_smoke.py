@@ -66,6 +66,15 @@ def send(address,path,args):
    for repeat in range(3):rows.append(f'{op},{src},{dst},{block},{repeat},8388608,100000,1')
   if os.environ.get('MEMORY_DUPLICATE'):rows[-1]=rows[-2]
   files[directory+'/memory-benchmark.csv']=('\n'.join(rows)+'\n').encode()
+  working=['operation,source,destination,cache_state,block_bytes,stride_bytes,repeat,bytes,ticks_us,verified']
+  for block in (8192,16384,32768,65536,131072,262144,524288,1048576):
+   for src in ('MEM1','MEM2'):
+    for state in ('cold','reused'):
+     for repeat in range(3):
+      for dst in aliases:working.append(f'copy_crc,{src},{dst},{state},{block},0,{repeat},2097152,1000,1')
+      for stride in (4,32,512,4096):working.append(f'read_stride,{src},CPU,{state},{block},{stride},{repeat},2097152,1000,1')
+  files[directory+'/memory-workingset.csv']=('\n'.join(working)+'\n').encode()
+
   files[directory+'/memory-complete']=b'1'
   files[directory+'/memory-capacity.csv']=b'bank,physical_bytes\nMEM1,25165824\nMEM2,67108864\nLC,16384\n'
  elif os.environ.get('ARCHIVE_TEST'):assert args[0]=='--smoke-frames=36000' and args[1].startswith('--archive-check=')

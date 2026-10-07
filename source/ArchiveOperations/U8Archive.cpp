@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
+#include "Diagnostics/MemoryProbes.h"
 
 #include "Prompts/PromptWindows.h"
 #include "FileOperations/fileops.h"
@@ -62,13 +63,19 @@ bool U8Archive::ParseFile()
         if(!memcmp(header+32,"LZ77",4)) {
             u64 input=FileSize-32;
             u32 output=header[37]|((u32)header[38]<<8)|((u32)header[39]<<16);
-            if(FileSize<40 || input>SIZE_MAX || input+output>wx_archive_memory_budget()) { CloseFile(); return false; }
-            u8 *compressed=(u8*)malloc((size_t)input);
+            if(FileSize<40 || input>UINT32_MAX || input+output>wx_archive_memory_budget()) { CloseFile(); return false; }
+            const bool scratch=!FromMem;
+            u8 *compressed=scratch ? (u8*)malloc((size_t)input) : FileBuffer+32;
+            if(scratch) WX_MEMORY_ALLOC(IO,WX_MEM_ARCHIVE_SCRATCH,compressed,input);
             u32 decodedSize=0;
             u8 *decoded=NULL;
-            if(compressed && ReadFile(compressed,(size_t)input,32)==input)
+            if(compressed && (!scratch || ReadFile(compressed,(size_t)input,32)==input))
                 decoded=uncompressLZ77(compressed,(u32)input,&decodedSize);
-            free(compressed);
+            if(decoded) WX_MEMORY_ALLOC(IO,WX_MEM_ARCHIVE_BUFFER,decoded,decodedSize);
+            if(scratch) {
+                WX_MEMORY_FREE(IO,WX_MEM_ARCHIVE_SCRATCH,compressed,input);
+                free(compressed);
+            }
             CloseFile();
             if(!decoded) return false;
             FileBuffer=decoded; FileSize=decodedSize; FromMem=true;

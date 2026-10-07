@@ -25,6 +25,8 @@
  ***************************************************************************/
 #include "FreeTypeGX.h"
 #include "Memory/mem2.h"
+#include "Diagnostics/MemoryProbes.h"
+#include <climits>
 
 extern const u8 font_ttf[];
 extern const u32 font_ttf_size;
@@ -47,8 +49,10 @@ void ClearFontData()
 
 	if(MainFont != (FT_Byte *) font_ttf)
 	{
-		if(MainFont != NULL)
+		if(MainFont != NULL) {
+			WX_MEMORY_FREE(CPU,WX_MEM_FONT,MainFont,MainFontSize);
 			MEM2_free(MainFont);
+		}
 		MainFont = (FT_Byte *) font_ttf;
 		MainFontSize = font_ttf_size;
 	}
@@ -64,25 +68,18 @@ bool SetupDefaultFont(const char *path)
 	if(path)
 		pfile = fopen(path, "rb");
 
-	if(pfile)
-	{
-		fseek(pfile, 0, SEEK_END);
-		MainFontSize = ftell(pfile);
-		rewind(pfile);
-
-		MainFont = (FT_Byte *) MEM2_alloc(MainFontSize);
-		if(!MainFont)
-		{
-			MainFont = (FT_Byte *) font_ttf;
-			MainFontSize = font_ttf_size;
-		}
-		else
-		{
-			fread(MainFont, 1, MainFontSize, pfile);
-			result = true;
-		}
-		fclose(pfile);
-	}
+    if(pfile) {
+        long length=-1;
+        if(fseek(pfile,0,SEEK_END)==0) length=ftell(pfile);
+        if(length>0 && length<=INT_MAX-32 && fseek(pfile,0,SEEK_SET)==0) {
+            MainFontSize=(u32)length;
+            MainFont=(FT_Byte*)MEM2_alloc(MainFontSize);
+            WX_MEMORY_ALLOC(CPU,WX_MEM_FONT,MainFont,MainFontSize);
+            result=MainFont && fread(MainFont,1,MainFontSize,pfile)==MainFontSize && !ferror(pfile);
+        }
+        if(fclose(pfile)!=0) result=false;
+        if(!result) ClearFontData();
+    }
 
 	SetupPDFFallbackFont(MainFont, MainFontSize);
 

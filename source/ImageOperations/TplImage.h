@@ -89,10 +89,7 @@ class TplImage
 
 		u8 * TPLBuffer;
 		u32 TPLSize;
-		const TPL_Header * TPLHeader;
-		std::vector<const TPL_Texture *> Texture;
-		std::vector<const TPL_Texture_Header *> TextureHeader;
-		std::vector<const u8 *> TplTextureBuffer;
+		std::vector<TPL_Texture_Header> TextureHeader;
 };
 
 #endif

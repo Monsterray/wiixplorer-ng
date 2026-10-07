@@ -250,6 +250,70 @@ static u32 MemoryArenaBytes(u32 low,u32 high,u32 base,u32 physical)
     return high-low;
 }
 
+static bool MemoryWorkingSetBench(const char *directory)
+{
+    const unsigned capacity=1024*1024,bytes=2*1024*1024;
+    const unsigned sizes[]={8192,16384,32768,65536,131072,262144,524288,1048576};
+    const unsigned strides[]={4,32,512,4096};
+    const char *banks[]={"MEM1","MEM2"},*aliases[]={"MEM1-K0","MEM1-K1","MEM2-K0","MEM2-K1"};
+    u8 *buffers[]={ (u8*)MEM1_memalign(32,capacity),(u8*)MEM1_memalign(32,capacity),
+                   (u8*)MEM2_alloc(capacity),(u8*)MEM2_alloc(capacity) };
+    bool okay=true;
+    for(unsigned i=0;i<4;++i) {
+        if(!buffers[i] || ((size_t)buffers[i]&31)) okay=false;
+#if defined(GEKKO)
+        if(buffers[i] && ((u32)buffers[i]>>28)!=(i<2 ? 8u : 9u)) okay=false;
+#endif
+    }
+    char report[768];int joined=snprintf(report,sizeof(report),"%s/memory-workingset.csv",directory);
+    FILE *out=okay && joined>0 && joined<(int)sizeof(report) ? fopen(report,"wb") : NULL;
+    if(!out) okay=false;
+    if(okay) okay=fprintf(out,"operation,source,destination,cache_state,block_bytes,stride_bytes,repeat,bytes,ticks_us,verified\n")>0;
+    for(unsigned block:sizes) for(unsigned src=0;okay && src<2;++src) {
+        u8 *input=buffers[src*2];
+        const unsigned loops=bytes/block;
+        for(unsigned cold=0;okay && cold<2;++cold) for(unsigned repeat=0;okay && repeat<3;++repeat) {
+            for(unsigned dst=0;okay && dst<2;++dst) for(unsigned uncached=0;okay && uncached<2;++uncached) {
+                // Distinct data per row makes stale cached output fail verification.
+                u32 salt=0x12345678u^block^(src<<24)^(dst<<23)^(cold<<22)^(repeat<<20)^(uncached<<19);
+                for(unsigned i=0;i<block/4;++i) ((u32*)input)[i]=i^salt;
+                u32 expectedCrc=crc32(0,input,block);DCFlushRange(input,block);
+                u8 *output=buffers[dst*2+1],*write=MemoryAlias(output,uncached);
+                // Canonical cached ownership is retained for free and CRC.
+                // Clean old owner/cache state before any uncached writes.
+                DCFlushRange(output,block);DCInvalidateRange(output,block);
+                bool verified=true;u64 start=gettime();
+                for(unsigned loop=0;loop<loops;++loop) {
+                    if(cold) { DCInvalidateRange(input,block);DCFlushRange(output,block);DCInvalidateRange(output,block); }
+                    memcpy(write,input,block);
+                    if(uncached) { MemorySync();DCInvalidateRange(output,block); }
+                    if(crc32(0,output,block)!=expectedCrc) verified=false;
+                }
+                u64 elapsed=ticks_to_microsecs(gettime()-start);
+                okay=fprintf(out,"copy_crc,%s,%s,%s,%u,0,%u,%u,%llu,%u\n",banks[src],aliases[dst*2+uncached],cold ? "cold" : "reused",block,repeat,bytes,elapsed,verified)>0 && MemoryCheckpoint(out) && elapsed && verified;
+            }
+            for(unsigned stride:strides) {
+                if(!okay) break;
+                u32 expectedSum=0;
+                for(unsigned i=0;i<block/4;++i) expectedSum+=((u32*)input)[i];
+                u32 sum=0;u64 start=gettime();
+                const volatile u32 *words=(const volatile u32*)input;
+                for(unsigned loop=0;loop<loops;++loop) {
+                    if(cold) DCInvalidateRange(input,block);
+                    for(unsigned lane=0;lane<stride/4;++lane)
+                        for(unsigned i=lane;i<block/4;i+=stride/4) sum+=words[i];
+                }
+                u64 elapsed=ticks_to_microsecs(gettime()-start);
+                bool verified=sum==expectedSum*loops;
+                okay=fprintf(out,"read_stride,%s,CPU,%s,%u,%u,%u,%u,%llu,%u\n",banks[src],cold ? "cold" : "reused",block,stride,repeat,bytes,elapsed,verified)>0 && MemoryCheckpoint(out) && elapsed && verified;
+            }
+        }
+    }
+    if(out && fclose(out)!=0) okay=false;
+    MEM1_free(buffers[0]);MEM1_free(buffers[1]);MEM2_free(buffers[2]);MEM2_free(buffers[3]);
+    return okay;
+}
+
 void RunMemoryBenchmark(const char *directory)
 {
     if (!directory || strlen(directory)>700 || strncmp(directory,"sd:/",4) ||
@@ -379,6 +443,7 @@ void RunMemoryBenchmark(const char *directory)
     } else okay=false;
     printf("Memory benchmark: releasing buffers, verified=%u\n",okay);fflush(stdout);
     MEM1_free(buffers[0]);MEM1_free(buffers[1]);MEM2_free(buffers[2]);MEM2_free(buffers[3]);
+    if(okay) okay=MemoryWorkingSetBench(directory);
     snprintf(report,sizeof(report),"%s/memory-complete",directory);
     out=fopen(report,"wb");
     if(out){fprintf(out,"%u",okay);fclose(out);}
