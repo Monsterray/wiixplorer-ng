@@ -66,6 +66,7 @@ generated packages are Git-ignored. See [testing build notes](RELEASE-CANDIDATE.
 
 [ARCHIVES.md](ARCHIVES.md) documents archive safety, limits and regression coverage.
 [STORAGE.md](STORAGE.md) records native SD/USB speeds and partition recommendations.
+[HARDWARE.md](HARDWARE.md) maps the complete Wii hardware research, current policies and evidence gaps.
 [MEMORY.md](MEMORY.md) records memory capacities and verified native MEM1/MEM2/LC measurements.
 [MEMORY-PLAN.md](MEMORY-PLAN.md) outlines memory placement, budgets and optimization validation.
 [DEBUGGING.md](DEBUGGING.md) describes isolated Dolphin tests, crash
