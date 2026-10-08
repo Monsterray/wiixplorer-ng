@@ -6,7 +6,7 @@
 bool DebugBenchArgument(DebugBenchArguments &args,const char *line)
 {
     if(!line) return false;
-    static const char *options[]={"--memory-bench=","--archive-check=","--archive-output=","--copy-bench=","--storage-bench=","--storage-report=","--media-bench="};
+    static const char *options[]={"--memory-bench=","--archive-check=","--archive-output=","--copy-bench=","--storage-bench=","--storage-report=","--media-bench=","--features-bench="};
     for(unsigned i=0;i<BenchOptions;++i) {
         size_t prefix=strlen(options[i]);
         if(strncmp(line,options[i],prefix)) continue;

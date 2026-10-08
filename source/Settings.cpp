@@ -461,15 +461,15 @@ bool CSettings::LoadLanguage(const char *path, int language)
 		}
 		else if(language == S_CHINESE)
 		{
-			snprintf(filepath, sizeof(filepath), "%s/s_chinese.lang", langpath);
+			snprintf(filepath, sizeof(filepath), "%s/schinese.lang", langpath);
 		}
 		else if(language == T_CHINESE)
 		{
-			snprintf(filepath, sizeof(filepath), "%s/t_chinese.lang", langpath);
+			snprintf(filepath, sizeof(filepath), "%s/tchinese.lang", langpath);
 		}
 		else if(language == KOREAN)
 		{
-			snprintf(filepath, sizeof(filepath), "%s%s/korean.lang", BootDevice, langpath);
+			snprintf(filepath, sizeof(filepath), "%s/korean.lang", langpath);
 		}
 
 		ret = gettextLoadLanguage(filepath);

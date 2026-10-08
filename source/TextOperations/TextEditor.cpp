@@ -16,6 +16,7 @@
  ****************************************************************************/
 #include <unistd.h>
 #include "TextOperations/TextEditor.h"
+#include "FileOperations/TransferFile.h"
 #include "Controls/Taskbar.h"
 #include "FileOperations/fileops.h"
 #include "FileOperations/FileLoadTask.h"
@@ -225,18 +226,18 @@ void TextEditor::SetText(const wchar_t *intext)
 
 void TextEditor::WriteTextFile(const std::string &path)
 {
-	FILE * f = fopen(path.c_str(), "wb");
-	if(!f)
-	{
-		ShowError(tr("Cannot write to the file."));
-		return;
-	}
-
-	const std::string &FullText = MainFileTxt->toUTF8();
-
-	fwrite(FullText.c_str(), 1, strlen(FullText.c_str())+1, f);
-
-	fclose(f);
+    // Complete conversion before acquiring a staging file/stream.
+    const std::string &text=MainFileTxt->toUTF8();
+    wx_transfer_file staging;
+    if (wx_transfer_begin(&staging,path.c_str()) != 0) { ShowError(tr("Cannot write to the file.")); return; }
+    FILE *file=fopen(staging.staged,"wb");
+    bool okay=file!=NULL;
+    if(file) {
+        okay=fwrite(text.data(),1,text.size(),file)==text.size() && fflush(file)==0;
+        if(fclose(file)!=0) okay=false;
+    }
+    if(okay) okay=wx_transfer_publish(&staging,staging.staged,path.c_str())==0;
+    if(!okay) { wx_transfer_abort(&staging);ShowError(tr("Cannot write to the file.")); }
 }
 
 void TextEditor::OnButtonClick(GuiButton *sender, int pointer UNUSED, const POINT &p UNUSED)

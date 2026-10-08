@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory() as tmp:
         (sd/'probes.csv').write_text('window,group,level,count,timed_count,total_us,max_us,value\n0,cpu,1,'+str(count)+',0,0,0,0\n0,gpu,3,1,0,0,0,0\n')
     def run():return subprocess.run(['python3',str(ROOT/'scripts/check-dolphin-smoke.py'),str(p)],capture_output=True,text=True)
     probes();assert run().returncode==0
-    for fault in ('DSI exception at 0x80001234','Invalid read from 0x00000010, PC = 0x80001234','Exception (ISI) occurred','Machine check exception','PANIC ALERT: guest fault'):
+    for fault in ('DSI exception at 0x80001234','Invalid read from 0x00000010, PC = 0x80001234','Exception (ISI) occurred','Machine check exception','PANIC ALERT: guest fault','Warning: GFX FIFO: Unknown Opcode (0x58)', 'IntCPU: Unknown instruction 00000000 at PC = 80666ca8','Warning: Unable to resolve read address ffffb708 PC 80666c9c'):
         (p/'Logs/dolphin.log').write_text(fault+'\n'+okay)
         result=run();assert result.returncode!=0,'Undetected guest fault: '+fault
     (p/'Logs/dolphin.log').write_text(okay)

@@ -81,7 +81,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <malloc.h>
 #include <ctype.h>
 
 #include "MD5.h"
@@ -543,52 +542,30 @@ unsigned char * MD5fromFile(unsigned char *dst, const char *src)
    *
    * ------------------------------------------------------------------------ **
    */
-  {
-  auth_md5Ctx ctx[1];
-
-	FILE * file;
-	unsigned int blksize = 0;
-	unsigned int read = 0;
-
-	file = fopen(src, "rb");
-
-	if (file==NULL){
-		return NULL;
-	}
-
-	(void)auth_md5InitCtx( ctx );			 /* Open a context.	  */
-
-	fseek (file , 0 , SEEK_END);
-	unsigned long long filesize = ftell(file);
-	rewind (file);
-
-	if(filesize < 1048576)				  //1MB cache for files bigger than 1 MB
-		blksize = filesize;
-	else
-		blksize = 1048576;
-
-	unsigned char * buffer = malloc(blksize);
-
-	if(buffer == NULL){
-		//no memory
-		fclose(file);
-		return NULL;
-	}
-
-	do
-	{
-		read = fread(buffer, 1, blksize, file);
-		(void)auth_md5SumCtx( ctx, buffer, read );	/* Pass only one block. */
-
-	} while(read > 0);
-
-	fclose(file);
-	free(buffer);
-
-	(void)auth_md5CloseCtx( ctx, dst );	   /* Close the context.   */
-
-	return( dst );							/* Makes life easy.	 */
-  } /* auth_md5Sum */
+{
+    if (!dst || !src) return NULL;
+    FILE *file=fopen(src,"rb");
+    if (!file) return NULL;
+    if (fseeko(file,0,SEEK_END)!=0) { fclose(file);return NULL; }
+    off_t length=ftello(file);
+    if (length<0 || (uint64_t)length>UINT32_MAX || fseeko(file,0,SEEK_SET)!=0) { fclose(file);return NULL; }
+    size_t capacity=length<1048576 ? (size_t)length : 1048576;
+    unsigned char *buffer=capacity ? malloc(capacity) : NULL;
+    if (capacity && !buffer) { fclose(file);return NULL; }
+    auth_md5Ctx ctx;auth_md5InitCtx(&ctx);
+    off_t remaining=length;int okay=1;
+    while (remaining>0) {
+        size_t chunk=remaining<(off_t)capacity ? (size_t)remaining : capacity;
+        size_t got=fread(buffer,1,chunk,file);
+        if (!got || got>chunk) { okay=0;break; }
+        auth_md5SumCtx(&ctx,buffer,(int)got);remaining-=got;
+    }
+    if(ferror(file)) okay=0;
+    if(fclose(file)!=0) okay=0;
+    free(buffer);
+    if (!okay) return NULL;
+    auth_md5CloseCtx(&ctx,dst);return dst;
+}
 
 
 const char * MD5ToString(const unsigned char * hash, char * dst)

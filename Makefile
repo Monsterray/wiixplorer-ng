@@ -53,6 +53,8 @@ LIBS := -Wl,--start-group -lhbcagent -lmupdf -lzip -lunrar -lsevenzip -ldi -lgd 
 
 .PHONY: all generated deps clean check debug release run lang FORCE
 all: $(OUTPUT).dol
+	cp .deps/prefix/hbc-agent.json $(BUILD)/hbc-agent.json
+	python3 scripts/package.py --config "$(CONFIG)"
 
 $(PROBE_CONFIG): FORCE
 	@python3 scripts/probe-config.py "$@" "$(CONFIG)" "$(PROBE_LEVEL)" "$(PROBE_GROUPS)" "$(OPT)" "$(CC)" "$(CFLAGS)" "$(CXXFLAGS)" "$(CPPFLAGS)"
@@ -131,6 +133,9 @@ check:
 	python3 tests/dolphin_process.py
 	python3 tests/validate_bench.py
 	python3 tests/wii_capture_build.py
+	python3 tests/package.py
+	CXX="$(HOST_CXX)" python3 tests/feature_io.py
+	CC="$(HOST_CC)" python3 tests/md5_file.py
 	python3 tests/dolphin_smoke.py
 	CXX="$(HOST_CXX)" python3 tests/debug_launch.py
 	CXX="$(HOST_CXX)" python3 tests/probes.py

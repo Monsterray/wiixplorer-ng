@@ -27,3 +27,9 @@ for occupied in (False,True):
     check.bind.assert_called_once_with(('192.168.1.2',4299))
     check.listen.assert_not_called();check.connect.assert_not_called()
 print('HBC port preflight: collision rejected without listener or foreign-agent connection')
+
+stop=module['stop']
+with patch.dict(stop.__globals__,windows=False), patch.dict(stop.__globals__,processes=MagicMock(return_value=[])):
+    stop('build/dolphin.relative')
+    assert stop.__globals__['processes'].call_args.args[0]==str(Path('build/dolphin.relative').resolve())
+print('Dolphin explicit stop: relative profile normalized before owned-process lookup')

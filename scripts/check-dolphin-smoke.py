@@ -22,7 +22,7 @@ try:
         if hashlib.sha256((profile/'artifacts'/name).read_bytes()).hexdigest() != digest:
             raise ValueError('Frozen artifact hash mismatch: '+name)
     log = (profile/'Logs/dolphin.log').read_text(errors='replace')
-    faults=re.findall(r'^.*(?:\b(?:DSI|ISI|machine check|program|alignment|FPU unavailable) exception\b|exception \((?:DSI|ISI)\)|invalid (?:read|write) (?:from|to)|panic alert|stack dump|backtrace:).*$',log,re.IGNORECASE|re.MULTILINE)
+    faults=re.findall(r'^.*(?:\b(?:DSI|ISI|machine check|program|alignment|FPU unavailable) exception\b|exception \((?:DSI|ISI)\)|unknown instruction|GFX FIFO: Unknown Opcode|unable to resolve (?:read|write) address|invalid (?:read|write) (?:from|to)|panic alert|stack dump|backtrace:).*$',log,re.IGNORECASE|re.MULTILINE)
     if faults: raise ValueError('Guest exception/error recorded: '+faults[0].strip())
     if 'WiiXplorer: shutdown cleanup completed'  not in log:
         raise ValueError('Guest did not report completed teardown')

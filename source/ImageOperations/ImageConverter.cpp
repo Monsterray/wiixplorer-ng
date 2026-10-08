@@ -80,6 +80,7 @@ bool ImageConverter::LoadImage(const char * filepath)
 
 bool ImageConverter::LoadImage(const u8 * img, int imgSize)
 {
+    if (!img || imgSize < 4) return false;
 	if (img[0] == 0xFF && img[1] == 0xD8)
 	{
 		gdImage = gdImageCreateFromJpegPtr(imgSize, (u8*) img);
@@ -172,13 +173,14 @@ bool ImageConverter::Convert()
 
 bool ImageConverter::ResizeImage(int newwidth, int newheight)
 {
+    if (newwidth <= 0 || newheight <= 0) return false;
 	if(gdImage == 0)
 		return false;
 
 	int imgwidth = gdImageSX(gdImage);
 	int imgheight = gdImageSY(gdImage);
 
-	if(imgwidth != newwidth || newheight != newheight)
+	if(imgwidth != newwidth || imgheight != newheight)
 	{
 		gdImagePtr dst = gdImageCreateTrueColor(newwidth, newheight);
 		if(dst == 0)

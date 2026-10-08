@@ -179,10 +179,10 @@ workstation's configured wii-bench entry point; never fake its job variables or
 bypass an unavailable lease server. The hardware runner rejects direct use.
 
 ```bash
-job="$(python3 "$HOME/.wii-bench/wiibench.py" add \
+job="$(python3 .deps/prefix/bin/wiibench.py add \
   --name 'WiiXplorer NG HBC-Reborn smoke' --agent wiixplorer-ng \
   --timeout 300 --cwd "$PWD" -- python3 scripts/hbc-smoke.py --hardware)"
-python3 "$HOME/.wii-bench/wiibench.py" wait "$job"
+python3 .deps/prefix/bin/wiibench.py wait "$job"
 ```
 
 The runner freezes the debug DOL/ELF/map, build configuration and SHA-256 hashes
@@ -600,7 +600,7 @@ through the shared Wii dev queue. Timing from Dolphin is not drive bandwidth.
 ## Reusable benchmark validation and HDMI capture
 
 Run `python3 scripts/validate-bench.py media --hardware` (also `copy`, `memory`
-or `archive`). It builds level-3 debug, freezes an isolated DOL, runs HBC smoke
+or `archive`, `features`, `ftp`). It builds level-3 debug, freezes an isolated DOL, runs HBC smoke
 and guest/core/probe checks in Dolphin, then submits that same artifact through
 the shared dev-Wii queue and waits for the job result. `--skip-build` uses an
 already-built debug DOL. Failure logs and `result.json` remain under ignored
@@ -638,3 +638,28 @@ Host FTP regressions bind control/data and occupied-port fixtures to loopback.
 They need no LAN listener or persistent firewall exception. Native debug stdout
 capture (`hbc-smoke.py --capture-log`) remains explicitly opt-in because it
 requires an inbound LAN listener; normal benchmark runs do not start it.
+
+
+## 0.1.13 testing build validation
+
+`python3 scripts/validate-bench.py features --hardware` exercises real image
+encoders/decoders (PNG, JPEG, GIF, TIFF, BMP, GD, GD2), height-only resize and
+flips, screenshots, UTF-8 text saves, empty/standard MD5, copy/rename/delete.
+It owns a new bounded SD fixture directory and removes only its own fixtures.
+The FTP mode seeds private temporary credentials, tests authentication and
+transfers, and preserves the Dolphin gate before queuing hardware. Passwords
+are never written to test logs; private settings/artifacts remain ignored.
+
+SDK, official host client and project queue client now come from the pinned
+HBC-Reborn 1.10.0 source. Frozen artifacts include `hbc-agent.json` with the
+commit, archive checksum and local patch checksum. The configured shared lease
+server remains the authority; this project does not restart another job's
+server/dispatcher. Historical research links retain their inspected revisions.
+
+Dolphin exit remains an open blocker: several runs faulted after application
+cleanup with an ISI/unknown-instruction exception. Experimental direct loader
+hooks and FTP socket changes did not resolve the failures reliably and were
+reverted. Diagnose the first guest exception before changing loader behavior.
+The controller requires Dolphin's core shutdown marker before closing the
+window; guest faults or a missing marker fail the gate and prevent hardware
+submission. Cleanup stops only the controller's owned Dolphin profile.

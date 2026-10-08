@@ -47,14 +47,23 @@ source checksums, Git revision, build flags, and output hashes.
 ## HBC-Reborn agent
 
 `scripts/build-hbc-agent.py` pins [HBC-Reborn commit
-3b1e9a4e04fbb1afb98f516a2446ef9789877f8f](https://github.com/Monsterray/hbc-reborn/tree/3b1e9a4e04fbb1afb98f516a2446ef9789877f8f),
-archive SHA-256 `0a62fb10826ea820f820f76925cba79ef78df06f319fb751a9802b0cdba7198b`.
-The SDK builds with official libogc, `-O2 -g`, and its upstream two-slot transfer
+a797ba98539e863a47409bfd8d62e4cf43f84d9d](https://github.com/Monsterray/hbc-reborn/tree/a797ba98539e863a47409bfd8d62e4cf43f84d9d),
+archive SHA-256 `ba7021289fb10368323f39e9707e9cfd4002fd84ab01fc612063cbb260cb6b4c`.
+This is upstream master HBC-Reborn 1.10.0, verified on 2026-10-07. The SDK builds with official libogc, `-O2 -g`, and its upstream two-slot transfer
 configuration. Source, build and the official host client stay under `.deps/`.
 The tracked `scripts/patches/hbc-agent.patch` adds graceful listener shutdown
 and closes HOME on remote exit. The app reserves the SDK's persistent MEM2
-records and joins the listener before unmounting devices. The network/crash
+netlog/crash/last-log records and joins the listener before unmounting devices. The network/crash
 features are enabled in debug builds; the HOME overlay is present in both.
+The patch removes `noreturn` from the now-returning exit-request wrapper and
+returns from the SDK Reset-button path after a polling app completes teardown.
+The patch permits a custom allocator so the SDK does not define duplicate
+WiiXplorer bank-routing wrappers; SDK allocation-failure counters do not track
+our allocator. WiiXplorer grouped memory probes remain authoritative. Physical
+buttons, frame pacing and filesystem cleanup stay owned by WiiXplorer through
+the SDK no_safety flags; release also disables SDK stack/thread diagnostics.
+The latest official host and queue clients are copied from this same pin,
+with its manifest at `.deps/prefix/hbc-agent.json`.
 
 Upstream specifies GPL version 2 or later for the agent and public domain for
 `hbc_netlog.h`. Its full GPL text is retained in

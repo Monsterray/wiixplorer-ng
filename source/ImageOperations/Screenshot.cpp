@@ -55,17 +55,18 @@ extern "C" bool Screenshot(const char * outpath, int format)
 	if(screenwidth != width || screenheight != height)
 	{
 		gdImagePtr dst = gdImageCreateTrueColor(screenwidth, screenheight);
+		if (!dst) { gdImageDestroy(gdImg); return false; }
 		gdImageCopyResized(dst, gdImg, 0, 0, 0, 0, screenwidth, screenheight, width, height);
 
 		gdImageDestroy(gdImg);
 		gdImg = dst;
 	}
 
-	WriteGDImage(outpath, gdImg, format, 0);
+	bool okay = WriteGDImage(outpath, gdImg, format, 0);
 
 	gdImageDestroy(gdImg);
 
-	return 0;
+	return okay;
 }
 
 bool Screenshot()
@@ -73,6 +74,7 @@ bool Screenshot()
 	time_t rawtime;
 	time(&rawtime);
 	struct tm * curtime = localtime(&rawtime);
+    if (!curtime) return false;
 
 	char Extension[6];
 
@@ -95,17 +97,17 @@ bool Screenshot()
 			sprintf(Extension, ".bmp");
 			break;
 		case IMAGE_GD:
-		case IMAGE_GD2:
 			sprintf(Extension, ".gd");
 			break;
 	}
 
+	if (Settings.ScreenshotFormat == IMAGE_GD2) strcpy(Extension, ".gd2");
 	char text[100];
-	strftime (text, sizeof(text), "WiiXplorer_%H%M%S", curtime);
+	if (!strftime(text, sizeof(text), "WiiXplorer_%H%M%S", curtime)) return false;
 
 	char filepath[400];
-	snprintf(filepath, sizeof(filepath), "%s/%s%s", Settings.ScreenshotPath, text, Extension);
-	CreateSubfolder(Settings.ScreenshotPath);
+	int joined=snprintf(filepath, sizeof(filepath), "%s/%s%s", Settings.ScreenshotPath, text, Extension);
+    if (joined < 0 || joined >= (int)sizeof(filepath) || !CreateSubfolder(Settings.ScreenshotPath)) return false;
 
 	return Screenshot(filepath, Settings.ScreenshotFormat);
 }

@@ -1,9 +1,10 @@
 # Networking lessons from HBC-Reborn
 
 Reviewed on 2026-10-03 against the local HBC-Reborn checkout at
-`3b1e9a4e04fbb1afb98f516a2446ef9789877f8f`, the same revision pinned by
-[our SDK builder](scripts/build-hbc-agent.py). That checkout has no tracked
-working-tree changes; its only untracked item is a banner build tool. These
+`3b1e9a4e04fbb1afb98f516a2446ef9789877f8f`. This is a historical research snapshot;
+[our SDK builder](scripts/build-hbc-agent.py) now pins 1.10.0 at
+`a797ba98539e863a47409bfd8d62e4cf43f84d9d`. The inspected historical checkout had no tracked
+working-tree changes; its only untracked item was a banner build tool. These
 findings describe that source revision, not the independently installed HBC
 version on the shared Wii. References below pin the inspected primary source.
 

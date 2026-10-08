@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Exercise SDK accept/read setup with POSIX non-inheriting accepted sockets."""
 from pathlib import Path
-import os,subprocess,tempfile
+import os,subprocess,tempfile,runpy
 ROOT=Path(__file__).resolve().parents[1]
-BASE=ROOT/'.deps/work/hbc-agent/hbc-reborn-3b1e9a4e04fbb1afb98f516a2446ef9789877f8f'
+REVISION=runpy.run_path(str(ROOT/'scripts/build-hbc-agent.py'))['REVISION']
+BASE=ROOT/('.deps/work/hbc-agent/hbc-reborn-'+REVISION)
 if not (BASE/'sdk/hbc_agent/agent.c').exists():
  print('HBC socket checks skipped: run make deps first')
  raise SystemExit(0)

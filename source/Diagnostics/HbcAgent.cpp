@@ -79,6 +79,9 @@ void HbcAgentInit()
     config.exit_grace_ms = 60000;
     config.no_network = !WX_DEBUG_BUILD;
     config.no_crash_handler = !WX_DEBUG_BUILD;
+    // WiiXplorer owns physical buttons, VI pacing and device teardown.
+    config.no_safety = HBC_AGENT_NO_BUTTONS | HBC_AGENT_NO_FLUSH | HBC_AGENT_NO_FRAMES;
+    if (!WX_DEBUG_BUILD) config.no_safety |= HBC_AGENT_NO_STACK_GUARD | HBC_AGENT_NO_THREADS;
     config.gc_pads = true;
     config.on_save = SaveSettings;
     config.on_exit_choice = ExitChoice;

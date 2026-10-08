@@ -19,9 +19,9 @@
 // Forbid the use of MEM2 through malloc
 u32 MALLOC_MEM2 = 0;
 
-// Leave persistent HBC log/crash records between the two allocation ranges.
+// Leave persistent HBC netlog/crash/last-log records between the two allocation ranges.
 static const u32 HbcKeepStart = HBC_NETLOG_KEEP_ADDR;
-static const u32 HbcKeepEnd = (HBC_CRASH_ADDR + sizeof(hbc_crash_block) + 31) & ~31u;
+static const u32 HbcKeepEnd = (HBC_LASTLOG_ADDR + sizeof(hbc_lastlog_block) + 31) & ~31u;
 static CMEM2Alloc g_mem2gp, g_mem2upper;
 static void *originalArena2Lo, *heapEnd;
 static CMEM2Alloc &HeapFor(const void *p)

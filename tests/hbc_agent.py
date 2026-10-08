@@ -44,7 +44,7 @@ struct CMEM2Alloc {
  unsigned FreeSize() { return hi-cursor; }
  void cleanup() { if(arena==(void *)hi) arena=(void *)lo; lo=hi=cursor=0; }
 };
-static const u32 HbcKeepStart=0x91800000, HbcKeepEnd=0x918000a0;
+static const u32 HbcKeepStart=0x91800000, HbcKeepEnd=0x91801140;
 static CMEM2Alloc g_mem2gp, g_mem2upper;
 static void *originalArena2Lo, *heapEnd;
 '''

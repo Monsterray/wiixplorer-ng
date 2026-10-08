@@ -27,16 +27,18 @@
 #include <gctypes.h>
 #include <gd.h>
 #include "ImageWrite.h"
+#include "FileOperations/TransferFile.h"
 #include "Tools/tools.h"
 
 bool WriteGDImage(const char * filepath, gdImagePtr gdImg, u8 format, u8 compression)
 {
-	if(gdImg == 0)
+	if(!filepath || gdImg == 0 || format > IMAGE_GD2)
 		return false;
 
-	FILE * file = fopen(filepath, "wb");
-	if(!file)
-		return false;
+	wx_transfer_file staging;
+    if (wx_transfer_begin(&staging, filepath) != 0) return false;
+    FILE * file = fopen(staging.staged, format == IMAGE_TIFF ? "w+b" : "wb");
+    if (!file) { wx_transfer_abort(&staging); return false; }
 
 	switch(format)
 	{
@@ -64,7 +66,9 @@ bool WriteGDImage(const char * filepath, gdImagePtr gdImg, u8 format, u8 compres
 			break;
 	}
 
-	fclose(file);
-
-	return true;
+    bool okay = !ferror(file) && ftell(file) > 0 && fflush(file) == 0;
+    if (fclose(file) != 0) okay = false;
+    if (okay) okay = wx_transfer_publish(&staging, staging.staged, filepath) == 0;
+    if (!okay) wx_transfer_abort(&staging);
+    return okay;
 }

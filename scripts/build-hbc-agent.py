@@ -2,19 +2,20 @@
 """Build the pinned HBC-Reborn SDK locally, including our shutdown patch."""
 import hashlib
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
-REVISION = '3b1e9a4e04fbb1afb98f516a2446ef9789877f8f'
-SHA256 = '0a62fb10826ea820f820f76925cba79ef78df06f319fb751a9802b0cdba7198b'
+REVISION = 'a797ba98539e863a47409bfd8d62e4cf43f84d9d'
+SHA256 = 'ba7021289fb10368323f39e9707e9cfd4002fd84ab01fc612063cbb260cb6b4c'
 SDK = Path(os.environ.get('DEVKITPRO', '/opt/devkitpro'))
 PPC = Path(os.environ.get('DEVKITPPC', SDK / 'devkitPPC'))
 
 def main():
-    archive = ROOT / '.deps/downloads/hbc-reborn.tar.gz'
+    archive = ROOT / ('.deps/downloads/hbc-reborn-'+REVISION+'.tar.gz')
     archive.parent.mkdir(parents=True, exist_ok=True)
     if not archive.exists():
         subprocess.run(['curl', '--fail', '--location', '--retry', '2',
@@ -47,7 +48,7 @@ def main():
         shutil.copy2(ROOT/'source'/header, source/'channel/channelapp/source'/Path(header).name)
     env = dict(os.environ, DEVKITPRO=str(SDK), DEVKITPPC=str(PPC))
     subprocess.run(['make', '-C', str(source/'sdk/hbc_agent'), 'OGC=libogc',
-                    'EXTRA_CFLAGS=-g'], env=env, check=True)
+                    'EXTRA_CFLAGS=-g -DHBC_AGENT_CUSTOM_ALLOCATOR'], env=env, check=True)
     prefix = ROOT / '.deps/prefix'
     for destination in ('include', 'lib', 'bin', 'licenses/hbc-agent'):
         (prefix/destination).mkdir(parents=True, exist_ok=True)
@@ -56,6 +57,8 @@ def main():
     shutil.copy2(source/'sdk/hbc_agent/libhbcagent.a', prefix/'lib/libhbcagent.a')
     shutil.copy2(source/'COPYING', prefix/'licenses/hbc-agent/COPYING')
     shutil.copy2(source/'tools/hbc.py', prefix/'bin/hbc.py')
+    shutil.copy2(source/'tools/wii-bench/wiibench.py', prefix/'bin/wiibench.py')
+    (prefix/'hbc-agent.json').write_text(json.dumps({'version':'1.10.0','revision':REVISION,'sha256':SHA256,'patch_sha256':hashlib.sha256(patch.read_bytes()).hexdigest()},indent=2)+'\n')
 
 if __name__ == '__main__':
     main()

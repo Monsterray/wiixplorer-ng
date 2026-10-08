@@ -24,6 +24,9 @@ jobs:
       - run: python3 tests/dolphin_process.py
       - run: python3 tests/validate_bench.py
       - run: python3 tests/wii_capture_build.py
+      - run: python3 tests/package.py
+      - run: python3 tests/feature_io.py
+      - run: python3 tests/md5_file.py
       - run: python3 tests/probes.py
       - run: python3 tests/hbc_agent.py
       - run: python3 tests/hbc_smoke.py
@@ -51,3 +54,5 @@ jobs:
             build/release/build-info.json
             build/debug/probe-config.h
             build/release/probe-config.h
+            release/wiixplorer/**
+            release/wiixplorer-debug/**

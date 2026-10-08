@@ -36,6 +36,7 @@ def processes(profile):
             and int(parts[0]) in dolphin_pids and (' -u '+profile) in parts[1].replace('\"', '')]
 
 def stop(profile, force=False, timed=False):
+    if not windows: profile = str(Path(profile).resolve())
     pids = processes(profile)
     for pid in pids:
         if windows:

@@ -39,7 +39,9 @@ run; subsequent builds reuse the verified downloads and compiled objects.
 
 The Makefile uses devkitPro's standard `wii_rules` and official libogc. It
 supports checkout paths containing spaces. `make release` produces
-`build/release/boot.{dol,elf,map}` with `-O2 -g`; `make debug` produces
+`build/release/boot.{dol,elf,map}` with `-O2 -g`. Both targets also stage ready-to-copy app folders under `release/`: release at
+`release/wiixplorer/boot.dol` and debug at `release/wiixplorer-debug/boot.dol`.
+`make debug` produces
 `build/debug/boot.{dol,elf,map}` with `-Og -g3`. Keep the matching ELF/map for
 debugging. Generated headers also stay under their build directory. `make clean` removes
 application outputs; deleting `.deps/work` and `.deps/prefix` forces dependency
@@ -53,8 +55,10 @@ its first successful run and a native Windows build remain to be verified.
 
 ## Run and contribute
 
-Copy `build/release/boot.dol`, `HBC/meta.xml`, and `HBC/icon.png` to
-`sd:/apps/wiixplorer-ng/` for Homebrew Channel. Settings still use the upstream
+Copy the contents of `release/wiixplorer/` to `sd:/apps/wiixplorer/` for
+Homebrew Channel. The folder includes `boot.dol`, `meta.xml`, `icon.png`,
+Languages and accompanying notices. `HBC/` remains the metadata/icon source;
+generated packages are Git-ignored. See [testing build notes](RELEASE-CANDIDATE.md). Settings still use the upstream
 `sd:/apps/WiiXplorer/WiiXplorer.cfg` location.
 
 `make run` opens an isolated Dolphin profile. Set `DOLPHIN_EXE` or

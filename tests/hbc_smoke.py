@@ -146,7 +146,7 @@ def generate(root):
  (root/'manifest').write_text(''.join(rows));return rows
 """)
     build=root/'build/debug';build.mkdir(parents=True)
-    for name in ('boot.dol','boot.elf','boot.map','probe-config.h'): (build/name).write_bytes(b'test')
+    for name in ('boot.dol','boot.elf','boot.map','probe-config.h','hbc-agent.json'): (build/name).write_bytes(b'test')
     (build/'build-info.json').write_text(json.dumps({'config':'debug'}))
     for failure, absent, storage, memory in ((False,False,False,False),(True,False,False,False),(False,True,False,False),(True,True,False,False),(False,False,True,False),(False,False,False,True)):
         env=dict(os.environ,WII_BENCH_JOB_START='1',WII_BENCH_IP='lease-only-test')

@@ -8,7 +8,7 @@ import tempfile
 from unittest.mock import patch
 
 main = runpy.run_path(str(Path(__file__).resolve().parents[1]/'scripts/validate-bench.py'))['main']
-for failure in (None, 'dolphin-check', 'hardware', 'stop'):
+for failure in (None, 'dolphin-check', 'hardware', 'stop', 'ftp'):
     with tempfile.TemporaryDirectory(prefix='wx-validation-') as directory:
         root = Path(directory)
         profile = root/'build/dolphin.fixture'
@@ -26,23 +26,23 @@ for failure in (None, 'dolphin-check', 'hardware', 'stop'):
             if 'add' in command:
                 kwargs['stdout'].write('fixture-job\n')
         with patch.dict(main.__globals__, ROOT=root), patch('sys.argv',
-                ['validate-bench.py', 'media', '--hardware', '--skip-build']), patch('subprocess.run', side_effect=run):
+                ['validate-bench.py', 'ftp' if failure=='ftp' else 'media', '--hardware', '--skip-build']), patch('subprocess.run', side_effect=run):
             try: main()
-            except subprocess.CalledProcessError: assert failure in ('dolphin-check','hardware')
-            else: assert failure in (None,'stop')
+            except subprocess.CalledProcessError: assert failure in ('dolphin-check','hardware','stop')
+            else: assert failure in (None,'stop','ftp')
         launch=next(command for command in commands if 'fixture-dolphin' in command)
         assert launch[-4:] == ['-e',str(profile/'artifacts/boot.dol'),'-u',str(profile)]
         prepare=next(i for i,c in enumerate(commands) if '--prepare-only' in c)
         port=next(i for i,c in enumerate(commands) if 'scripts/hbc-port.py' in c)
         assert prepare<port<commands.index(launch)
         queued = [command for command in commands if 'add' in command]
-        assert bool(queued) == (failure!='dolphin-check')
+        assert bool(queued) == (failure not in ('dolphin-check','stop'))
         if queued:
             assert queued[0][-1] == str(profile/'artifacts')
             assert commands.index(queued[0]) > next(i for i,c in enumerate(commands) if 'scripts/check-dolphin-smoke.py' in c)
             assert any('wait' in command and 'fixture-job' in command for command in commands)
-        assert commands[-1][-2:] == ['--stop', str(profile)]
+        assert commands[-1][-2:] == ['--force-stop' if failure=='stop' else '--stop', str(profile)]
         result = json.loads(next((root/'build').glob('validation-*/result.json')).read_text())
-        assert result['passed'] == (failure is None)
+        assert result['passed'] == (failure in (None,'ftp'))
         assert ('cleanup_error' in result)==(failure=='stop')
 print('Validation runner: frozen artifact, Dolphin gate, queue wait and owned cleanup passed')

@@ -21,11 +21,11 @@ while [ "$#" -gt 0 ]; do
         --build) shift; build_config=${1:?debug or release required} ;;
         --gdb-port) shift; gdb_port=${1:?port required} ;;
         --config-seed) shift; config_seed=${1:?configuration file required} ;;
-        --bench) shift; bench=${1:?archive, memory, storage, copy or media required} ;;
+        --bench) shift; bench=${1:?archive, memory, storage, copy, media or features required} ;;
         --sd-image) shift; sd_image=${1:?image required} ;;
         --seconds) shift; seconds=${1:?seconds required} ;;
         --status|--stop|--force-stop|--stop-all) exec python3 "$root/scripts/dolphin-process.py" "$1" ;;
-        *) printf 'Usage: %s [--build debug|release] [--prepare-only] [--debug] [--capture] [--seconds N] [--smoke-frames N] [--gdb-port PORT] [--bench archive|memory|storage|copy|media] [--sd-image PATH] [--config-seed PATH] [--status|--stop|--force-stop|--stop-all]\n' "$0" >&2; exit 2 ;;
+        *) printf 'Usage: %s [--build debug|release] [--prepare-only] [--debug] [--capture] [--seconds N] [--smoke-frames N] [--gdb-port PORT] [--bench archive|memory|storage|copy|media|features] [--sd-image PATH] [--config-seed PATH] [--status|--stop|--force-stop|--stop-all]\n' "$0" >&2; exit 2 ;;
     esac
     shift
 done
@@ -48,6 +48,7 @@ mkdir -p "$profile/Config" "$profile/artifacts" \
 for file in boot.dol boot.elf boot.map probe-config.h build-info.json; do
     if [ -f "$build_dir/$file" ]; then cp "$build_dir/$file" "$profile/artifacts/$file"; fi
 done
+cp "$root/.deps/prefix/hbc-agent.json" "$profile/artifacts/hbc-agent.json"
 if [ -n "$sd_image" ]; then cp "$sd_image" "$profile/Load/WiiSD.raw"; fi
 if [ -n "$smoke_frames" ]; then
     if [ -n "$sd_image" ]; then printf 'Seed smoke-frames.txt in the raw image before using --sd-image.\n' >&2; exit 2; fi
@@ -61,9 +62,9 @@ if [ -n "$bench" ]; then
         archive)
             python3 "$root/scripts/archive-fixtures.py" "$profile/Load/WiiSDSync/wiixplorer-archive-$(basename "$profile")"
             printf '%s\n' "--archive-check=sd:/wiixplorer-archive-$(basename "$profile")" > "$profile/Load/WiiSDSync/apps/WiiXplorer/bench.cfg" ;;
-        memory|storage|copy|media)
+        memory|storage|copy|media|features)
             printf '%s\n' "--$bench-bench=sd:/wiixplorer-copy-$(basename "$profile")" > "$profile/Load/WiiSDSync/apps/WiiXplorer/bench.cfg" ;;
-        *) printf 'Bench must be archive, memory, storage, copy or media.\n' >&2; exit 2 ;;
+        *) printf 'Bench must be archive, memory, storage, copy, media or features.\n' >&2; exit 2 ;;
     esac
     printf '%s\n' "$bench" > "$profile/bench.txt"
 fi

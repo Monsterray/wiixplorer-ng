@@ -1,6 +1,6 @@
 --- a/sdk/hbc_agent.h
 +++ b/sdk/hbc_agent.h
-@@ -157,6 +157,10 @@
+@@ -258,6 +258,10 @@
     negative error when the thread cannot start. Call once. */
  s32 hbc_agent_init(const hbc_agent_config *cfg);
  
@@ -18,10 +18,10 @@
  
  #include <errno.h>
 +#include <fcntl.h>
+ #include <stdarg.h>
  #include <malloc.h>
  #include <stdio.h>
- #include <stdlib.h>
-@@ -65,6 +66,8 @@
+@@ -74,6 +75,8 @@
  static u8 *stack;
  static u64 start_ticks;
  static volatile bool exit_requested;
@@ -30,7 +30,7 @@
  #if AGENT_TUXEDO
  static PPCExcptPanicFn prev_panic;
  #endif
-@@ -436,16 +439,17 @@
+@@ -490,16 +493,17 @@
  }
  
  // Leaves the app for HBC, through the reload stub like any other exit().
@@ -50,7 +50,7 @@
  	// The app did not exit by itself (or does not poll): do it here, above
  	// the app's threads so they cannot run into a half-shut-down system.
  	LWP_SetThreadPriority(LWP_GetSelf(), LWP_PRIO_HIGHEST);
-@@ -474,11 +478,13 @@
+@@ -557,11 +561,13 @@
  		devfile_reply(s, 0, NULL, 0);
  		tcp_close(s);
  		agent_exit();
@@ -64,7 +64,7 @@
  	} else {
  		devfile_reply(s, -ENOSYS, NULL, 0);
  	}
-@@ -495,7 +501,7 @@
+@@ -578,7 +584,7 @@
  			if (res < 0 && res != -EBUSY)
  				return res;
  		}
@@ -73,16 +73,16 @@
  			usleep(50 * 1000);
  	}
  	return res < 0 ? res : 0;
-@@ -508,7 +514,7 @@
+@@ -591,7 +597,7 @@
  	u8 hdr[16];
  	(void) arg;
  
 -	while (true) {
 +	while (!stop_requested) {
  		// The overlay's "hbc.py connection" switch.
+ 		safety_poll(false);
  		if (!agent_listen_enabled) {
- 			if (ls >= 0) {
-@@ -523,6 +529,7 @@
+@@ -607,6 +613,7 @@
  				usleep(AGENT_RETRY_MS * 1000);
  				continue;
  			}
@@ -90,7 +90,7 @@
  			mask = net_gethostip() & 0xffff0000;
  			ls = tcp_listen(LD_TCP_PORT, 3);
  			if (ls < 0) {
-@@ -560,15 +567,25 @@
+@@ -644,15 +651,25 @@
  			continue;
  		}
  
@@ -116,7 +116,7 @@
  	return NULL;
  }
  
-@@ -742,3 +759,17 @@
+@@ -990,3 +1007,17 @@
  	}
  	return res < 0 ? res : 0;
  }
@@ -136,15 +136,61 @@
 +}
 --- a/sdk/hbc_agent/overlay.c
 +++ b/sdk/hbc_agent/overlay.c
-@@ -1482,7 +1482,7 @@
+@@ -1366,7 +1366,7 @@
+ 
+ static int last_chan = -1;
+ 
+-static unsigned read_input(void) {
++static unsigned read_input(bool ready) {
+ 	static u32 key_wait;
+ 	unsigned out = 0;
+ 	int chan;
+@@ -1374,7 +1374,9 @@
+ 	// Keys from the PC, one every 12 frames so animations can finish.
+ 	if (key_wait)
+ 		key_wait--;
+-	else {
++	// ov_step ignores navigation while opening/closing. Keep queued presses
++	// until it can consume them, rather than dropping a direction before A.
++	else if (ready) {
+ 		switch (agent_key_pop()) {
+ 		case 'u': out = OV_UP; break;
+ 		case 'd': out = OV_DOWN; break;
+@@ -1568,7 +1570,7 @@
+ 			agent_cfg()->on_frame(agent_cfg()->user);
+ 		poll(&r);
+ 		ir_update(r.w, r.h);
+-		pressed = read_input();
++		pressed = read_input(ui.open_t == 256 && !ui.closing);
+ 		pointing = ir_read(px, py, pa);
+ 		ov_point(&ui, px, py, pa, pointing, last_chan);
+ 		us = ticks_to_microsecs(diff_ticks(t0, gettime()));
+@@ -1577,7 +1579,7 @@
  		cal_sample();
  		fx_tick();
  		// An Exit choice the app handles: close everything first.
 -		if (r.exit_choice && !ui.closing)
 +		if ((r.exit_choice || hbc_agent_exit_requested()) && !ui.closing)
  			pressed = OV_HOME;
+ 		ui_ticks = ui.ticks;
  		running = ov_step(&ui, &r.ext, pressed, act, NULL);
+--- a/sdk/hbc_agent/alloc_wrap.c
++++ b/sdk/hbc_agent/alloc_wrap.c
+@@ -20,6 +20,8 @@
  
+ agent_alloc_stats agent_alloc;
+ 
++// WiiXplorer owns the allocator wrappers and bank-routing policy.
++#ifndef HBC_AGENT_CUSTOM_ALLOCATOR
+ static void failed(const char *what, size_t size, void *from) {
+ 	static volatile int printing;
+ 
+@@ -66,3 +68,5 @@
+ 		failed("memalign", size, __builtin_return_address(0));
+ 	return p;
+ }
++
++#endif // HBC_AGENT_CUSTOM_ALLOCATOR
 --- a/channel/channelapp/source/devfile.c
 +++ b/channel/channelapp/source/devfile.c
 @@ -1,3 +1,5 @@
@@ -184,7 +230,7 @@
  }
  
  // Reply header: s32 status (0 or -errno), u32 payload length.
-@@ -128,14 +129,14 @@
+@@ -130,14 +131,14 @@
  
  	f = fopen(part, "wb");
  	if (!f)
@@ -201,7 +247,7 @@
  			err = -EINTR;
  			break;
  		}
-@@ -153,13 +154,9 @@
+@@ -155,13 +156,9 @@
  	}
  
  	if (f && fclose(f) && !err)
@@ -218,7 +264,7 @@
  		unlink(part);
  	}
  
-@@ -174,7 +171,7 @@
+@@ -176,7 +173,7 @@
  	FILE *f;
  	u32 left;
  
@@ -227,7 +273,7 @@
  		devfile_reply(s, -ENOENT, NULL, 0);
  		return;
  	}
-@@ -193,12 +190,11 @@
+@@ -195,12 +192,11 @@
  			u32 block = left > DEVFILE_CHUNK ? DEVFILE_CHUNK : left;
  			u64 t0 = gettime();
  
@@ -243,7 +289,7 @@
  			st->disk += diff_ticks(t0, t1);
  			st->net += diff_ticks(t1, gettime());
  			st->wire += block;
-@@ -268,6 +264,9 @@
+@@ -270,6 +266,9 @@
  		devfile_reply(s, -ENOENT, NULL, 0);
  		return;
  	}
@@ -253,7 +299,7 @@
  	if (S_ISDIR(st.st_mode)) {
  		devfile_reply(s, -EISDIR, NULL, 0);
  		return;
-@@ -278,9 +277,15 @@
+@@ -280,9 +279,15 @@
  		devfile_reply(s, -errno, NULL, 0);
  		return;
  	}
@@ -271,7 +317,7 @@
  
  	put_u32(out, st.st_size);
  	put_u32(out + 4, crc);
-@@ -289,7 +294,7 @@
+@@ -291,7 +296,7 @@
  
  static void file_request(s32 s, const u8 *hdr, devfile_change_fn changed) {
  	char path[DEVFILE_PATH_MAX];
@@ -280,7 +326,7 @@
  	u8 op = hdr[4];
  	u16 path_len = get_u16(hdr + 6);
  	u32 size = get_u32(hdr + 8);
-@@ -330,9 +335,14 @@
+@@ -334,9 +339,14 @@
  			break;
  		}
  		make_parents(path);
@@ -298,7 +344,7 @@
  		if (!err && changed)
  			changed(path);
  		devfile_reply(s, err, NULL, 0);
-@@ -386,6 +396,7 @@
+@@ -390,6 +400,7 @@
  	}
  
  	abort_requested = false;
@@ -306,7 +352,7 @@
  	active_socket = s;
  	request_prio = prio;
  	busy = true;
-@@ -401,7 +412,7 @@
+@@ -405,7 +416,7 @@
  }
  
  bool devfile_aborted(void) {
@@ -326,7 +372,7 @@
  #include <malloc.h>
  #include <stdio.h>
  #include <string.h>
-@@ -249,12 +251,8 @@
+@@ -253,12 +255,8 @@
  
  	err = job.result;
  	if (fclose(job.f) && !err)
@@ -341,7 +387,7 @@
  		unlink(part);
  	}
  	return err;
-@@ -326,7 +324,7 @@
+@@ -330,7 +328,7 @@
  	u8 hdr[8];
  	bool sending = true;
  
@@ -350,7 +396,7 @@
  		devfile_reply(s, -ENOENT, NULL, 0);
  		return;
  	}
-@@ -353,10 +351,14 @@
+@@ -357,10 +355,14 @@
  		return;
  	}
  
@@ -366,39 +412,31 @@
  	stats->net += diff_ticks(t0, gettime());
  
  	while (true) {
-@@ -394,5 +396,6 @@
+@@ -398,5 +400,6 @@
  	}
  
  	teardown();
 +	if (sendFlags >= 0) net_fcntl(s, F_SETFL, sendFlags);
  	fclose(job.f);
  }
---- a/sdk/hbc_agent/overlay.c
-+++ b/sdk/hbc_agent/overlay.c
-@@ -1315,6 +1315,6 @@
- static int last_chan = -1;
- 
--static unsigned read_input(void) {
-+static unsigned read_input(bool ready) {
- 	static u32 key_wait;
- 	unsigned out = 0;
- 	int chan;
-@@ -1321,7 +1321,9 @@
- 	// Keys from the PC, one every 12 frames so animations can finish.
- 	if (key_wait)
- 		key_wait--;
--	else {
-+	// ov_step ignores navigation while opening/closing. Keep queued presses
-+	// until it can consume them, rather than dropping a direction before A.
-+	else if (ready) {
- 		switch (agent_key_pop()) {
- 		case 'u': out = OV_UP; break;
- 		case 'd': out = OV_DOWN; break;
-@@ -1477,6 +1477,6 @@
- 		poll(&r);
- 		ir_update(r.w, r.h);
--		pressed = read_input();
-+		pressed = read_input(ui.open_t == 256 && !ui.closing);
- 		pointing = ir_read(px, py, pa);
- 		ov_point(&ui, px, py, pa, pointing, last_chan);
- 		cal_sample();
+--- a/sdk/hbc_agent/agent_int.h
++++ b/sdk/hbc_agent/agent_int.h
+@@ -41,7 +41,7 @@
+ void agent_log_raw(const char *s, u32 len);
+ void agent_stop_record(u32 kind, u32 code, const char *reason, u32 pc, u32 lr, u32 sp);
+ void agent_lastlog(u32 why);
+-void agent_request_exit(void) __attribute__((noreturn));
++void agent_request_exit(void);
+ void agent_power_off(void) __attribute__((noreturn));
+ extern void __reload(void) __attribute__((noreturn));
+ /* The overlay is open, or the app holds the hang watchdog (a load). */
+--- a/sdk/hbc_agent/safety.c
++++ b/sdk/hbc_agent/safety.c
+@@ -556,6 +556,7 @@
+ 		if (b == 1) {
+ 			printf("%s: Reset pressed: exiting to HBC\n", cfg->name ? cfg->name : "app");
+ 			agent_request_exit();
++			return; // A polling app may have joined the agent instead of exiting here.
+ 		}
+ 		printf("%s: Power pressed: switching off\n", cfg->name ? cfg->name : "app");
+ 		agent_power_off();

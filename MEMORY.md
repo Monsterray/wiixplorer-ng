@@ -263,7 +263,7 @@ python3 scripts/check-dolphin-smoke.py build/dolphin.PROFILE
 Only after both checks pass, queue that **same frozen DOL** on the shared dev Wii:
 
 ```sh
-python3 "$HOME/.wii-bench/wiibench.py" add \
+python3 .deps/prefix/bin/wiibench.py add \
   --name wiixplorer-memory-speed --agent wiixplorer-ng --timeout 600 \
   --cwd "$PWD" -- python3 scripts/hbc-smoke.py --hardware --memory-bench \
   --build-dir build/dolphin.PROFILE/artifacts
@@ -300,3 +300,15 @@ and [libogc2 implementation](https://github.com/extremscorner/libogc2/blob/maste
 These workarounds are confined to the debug benchmark; the shared SDK and
 release memory behavior remain unchanged. Stale pending/recovery status is
 superseded by the successful native runs above.
+
+
+### HBC-Reborn 1.10.0 reservation (0.1.13)
+
+The pinned SDK adds a 4 KiB retained last-log payload. The reserved MEM2 gap is
+now `[0x91800000, 0x91801140)` (4,416 bytes, aligned to 32 bytes), covering netlog,
+crash and last-log records. Allocation never crosses that gap. This subtracts
+4,256 bytes more than the earlier 160-byte reservation; historical capacity and
+speed results above remain measurements of their original builds. The SDK uses
+WiiXplorer's allocator wrappers, preserving existing bank routing and ownership
+accounting; SDK allocation-failure statistics are not the application allocator
+counters. Runtime WiiXplorer memory probes remain the accounting authority.
