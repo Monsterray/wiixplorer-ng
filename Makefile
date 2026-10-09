@@ -131,6 +131,7 @@ check:
 	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/regression.py
 	CC="$(HOST_CC)" CXX="$(HOST_CXX)" python3 tests/stability.py
 	python3 tests/dolphin_process.py
+	python3 tests/diagnose.py
 	python3 tests/validate_bench.py
 	python3 tests/wii_capture_build.py
 	python3 tests/package.py

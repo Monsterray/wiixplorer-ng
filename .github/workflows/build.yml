@@ -22,6 +22,7 @@ jobs:
       - run: python3 tests/regression.py
       - run: python3 tests/stability.py
       - run: python3 tests/dolphin_process.py
+      - run: python3 tests/diagnose.py
       - run: python3 tests/validate_bench.py
       - run: python3 tests/wii_capture_build.py
       - run: python3 tests/package.py

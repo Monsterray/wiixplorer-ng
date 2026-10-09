@@ -27,6 +27,8 @@ parser = argparse.ArgumentParser()
 mode = parser.add_mutually_exclusive_group(required=True)
 mode.add_argument('--profile', type=Path, help='active isolated Dolphin profile')
 mode.add_argument('--hardware', action='store_true', help='only inside a wii-bench job')
+parser.add_argument('--exit-only', action='store_true', help='minimal status/HOME/exit; no screenshot or file roundtrip')
+parser.add_argument('--max-log-mib', type=int, default=64, help='Dolphin log budget before failing, 1..1024 MiB')
 parser.add_argument('--ftp-port', type=int, help='override the FTP fixture port (default Wii 21, Dolphin 2121)')
 parser.add_argument('--ftp-smoke', action='store_true', help='temporary authenticated FTP server roundtrip, append/resume, idle timeout and exit')
 parser.add_argument('--capture-device', help='macOS HDMI device ID; leased hardware jobs only, no camera prompts')
@@ -42,6 +44,7 @@ parser.add_argument('--transfer-mib', type=int, default=8, help='transfer fixtur
 parser.add_argument('--transfer-repeats', type=int, default=3, help='throughput repetitions, 1..10 (default 3)')
 parser.add_argument('--build-dir', type=Path, default=ROOT/'build/debug', help='frozen debug artifacts for comparisons')
 a = parser.parse_args()
+if not 1 <= a.max_log_mib <= 1024: parser.error('Log budget must be 1..1024 MiB')
 if not 1 <= a.transfer_mib <= 64 or not 1 <= a.transfer_repeats <= 10:
     parser.error("Transfer size/repetitions out of bounds")
 client = ROOT/'.deps/prefix/bin/hbc.py'
@@ -55,6 +58,7 @@ if a.storage_device and a.storage_device!='sd' and not a.hardware: parser.error(
 if a.archive_device=='usb1' and not a.hardware: parser.error('Dolphin does not validate physical USB mounts')
 # Dolphin executes memory operations for correctness; its timings are not hardware speeds.
 if sum(bool(x) for x in (a.memory_bench,a.storage_device,a.copy_bench,a.archive_device,a.media_bench,a.features_bench))>1: parser.error('Choose one benchmark')
+if a.exit_only and any((a.memory_bench,a.storage_device,a.copy_bench,a.archive_device,a.media_bench,a.features_bench,a.ftp_smoke,a.transfer_bench)): parser.error('Minimal exit cannot be combined with another scenario')
 
 if a.hardware:
     if not os.environ.get('WII_BENCH_JOB_START') or not os.environ.get('WII_BENCH_IP'):
@@ -109,7 +113,13 @@ archive_owned=False
 archive_cleanup=set()
 backups = {}
 created_dirs = []
+scenario_started=time.monotonic()
+def checkpoint(name):
+    # Last entered boundary only; this is not an acceptance verdict.
+    (profile/'scenario-stage.json').write_text(json.dumps({'stage':name,
+        'seconds':round(time.monotonic()-scenario_started,3)})+'\n')
 try:
+    checkpoint('startup')
     if a.capture_device:
         helper=ROOT/'build/tools/wii-capture'
         if not helper.exists(): raise RuntimeError('Build the HDMI capture helper before queuing the job')
@@ -183,6 +193,8 @@ try:
     deadline = time.monotonic()+(300 if a.memory_bench or a.media_bench else 30)
     while True:
         try:
+            if not a.hardware and (profile/'Logs/dolphin.log').exists() and (profile/'Logs/dolphin.log').stat().st_size > a.max_log_mib * 1024 * 1024:
+                raise RuntimeError('Dolphin log budget exceeded during startup')
             status = hbc.status(address)
             if status.get('agent') and status.get('app') == 'WiiXplorer NG': break
         except (OSError,hbc.HBCError):
@@ -190,6 +202,7 @@ try:
         if time.monotonic()>deadline: raise RuntimeError('WiiXplorer agent did not start')
         time.sleep(.5)
     (profile/'hbc-status.json').write_text(json.dumps(status,indent=2))
+    checkpoint('agent-ready')
     if a.hardware: hbc.foreign_app_check(address)
 
     if a.media_bench or a.features_bench:
@@ -352,189 +365,199 @@ try:
         for (operation,buffer),speeds in (groups.items() if a.hardware else ()):
             print(f'{a.storage_device or "sd"} {operation} {buffer//1024} KiB: median {statistics.median(speeds):.3f} MiB/s ({len(speeds)} verified runs)',flush=True)
 
-    # The feature/media jobs verify the overlay. Keep the FTP job focused on
-    # transport: multi-MiB screenshots compete for the same native IOS sockets.
-    if not a.ftp_smoke:
-        time.sleep(1) # Let the startup fade finish.
-        shot('browser.png')
-        key('h'); shot('home.png')
-        key('la'); shot('settings.png'); key('a'); shot('settings-saved.png')
-        key('b'); key('rra'); shot('diagnostics.png') # Back to Settings, then two tabs right.
-        key('a'); shot('probes-flushed.png')
-        key('h'); shot('browser-restored.png')
-    data = b'WiiXplorer HBC-Reborn roundtrip\n'*100
-    hbc.put_file(address,remote,data); uploaded = True
-    if hbc.get_file(address,remote) != data: raise RuntimeError('File roundtrip differs')
-    if a.transfer_bench:
-        measurements = []
-        fixture_bytes=a.transfer_mib*1024*1024
-        seed=b'WiiXplorer-transfer-benchmark!\n'
-        compressible=(seed*((fixture_bytes+len(seed)-1)//len(seed)))[:fixture_bytes]
-        for label, payload, level in (
-            ('random', random.Random(42).randbytes(fixture_bytes), 0),
-            ('compressible', compressible, 6)):
-            for repeat in range(a.transfer_repeats):
-                start_transfer=time.monotonic()
-                hbc.put_file(address,remote,payload,level=level)
-                upload_seconds=time.monotonic()-start_transfer
-                start_transfer=time.monotonic()
-                received=hbc.get_file(address,remote,compress=bool(level))
-                download_seconds=time.monotonic()-start_transfer
-                if received != payload: raise RuntimeError('Benchmark SHA/content mismatch')
-                measurements.append({'kind':label, 'repeat':repeat, 'bytes':len(payload),
-                    'upload_mib_s':len(payload)/1048576/upload_seconds,
-                    'download_mib_s':len(payload)/1048576/download_seconds,
-                    'sha256':hashlib.sha256(payload).hexdigest()})
-                print('Verified',label,repeat+1,'upload/download MiB/s',
-                      round(measurements[-1]['upload_mib_s'],3),
-                      round(measurements[-1]['download_mib_s'],3),flush=True)
-        # At least 8 MiB must remain to fill large Dolphin host send buffers,
-        # even when the timing fixture was shortened for diagnosis.
-        if fixture_bytes < 8*1024*1024:
-            hbc.put_file(address,remote,random.Random(43).randbytes(8*1024*1024),level=0)
-        # Keep a download peer connected without draining its receive window.
-        # The app must release its listener through the send watchdog, while
-        # this peer is still open; closing it first would not prove the bound.
-        with hbc.connect(address) as stalled:
-            stalled.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
-            started=time.monotonic()
-            stalled.sendall(hbc.file_header('g',remote,flags=0))
-            deadline=started+(20 if a.hardware else 60)
-            while True:
-                try:
-                    if hbc.is_agent(hbc.version(address,timeout=1)): break
-                except (OSError,hbc.HBCError): pass
-                if time.monotonic() >= deadline:
-                    raise RuntimeError('Stalled download held the app listener')
-                time.sleep(.25)
-            stalled_download_seconds=round(time.monotonic()-started,3)
-        # Existing data must survive malformed, truncated, and stalled uploads.
-        hbc.put_file(address,remote,data)
-        for failure in ('crc', 'short', 'idle', 'oversize'):
-            with hbc.connect(address) as conn:
-                if failure == 'oversize':
-                    conn.sendall(hbc.file_header('p',remote,512*1024*1024+1))
-                else:
-                    conn.sendall(hbc.file_header('p',remote,4))
-                    if failure == 'crc': conn.sendall(struct.pack('>III',4,4,0)+b'bad!')
-                    elif failure == 'short':
-                        conn.sendall(struct.pack('>III',4,4,zlib.crc32(b'test'))+b't')
-                        conn.shutdown(socket.SHUT_WR)
-                    # idle: wait for the app's bounded receive timeout.
+    data=b''
+    if not a.exit_only:
+        # The feature/media jobs verify the overlay. Keep the FTP job focused on
+        # transport: multi-MiB screenshots compete for the same native IOS sockets.
+        if not a.ftp_smoke:
+            time.sleep(1) # Let the startup fade finish.
+            shot('browser.png')
+            key('h'); shot('home.png')
+            key('la'); shot('settings.png'); key('a'); shot('settings-saved.png')
+            key('b'); key('rra'); shot('diagnostics.png') # Back to Settings, then two tabs right.
+            key('a'); shot('probes-flushed.png')
+            key('h'); shot('browser-restored.png')
+        data = b'WiiXplorer HBC-Reborn roundtrip\n'*100
+        hbc.put_file(address,remote,data); uploaded = True
+        if hbc.get_file(address,remote) != data: raise RuntimeError('File roundtrip differs')
+        if a.transfer_bench:
+            measurements = []
+            fixture_bytes=a.transfer_mib*1024*1024
+            seed=b'WiiXplorer-transfer-benchmark!\n'
+            compressible=(seed*((fixture_bytes+len(seed)-1)//len(seed)))[:fixture_bytes]
+            for label, payload, level in (
+                ('random', random.Random(42).randbytes(fixture_bytes), 0),
+                ('compressible', compressible, 6)):
+                for repeat in range(a.transfer_repeats):
+                    start_transfer=time.monotonic()
+                    hbc.put_file(address,remote,payload,level=level)
+                    upload_seconds=time.monotonic()-start_transfer
+                    start_transfer=time.monotonic()
+                    received=hbc.get_file(address,remote,compress=bool(level))
+                    download_seconds=time.monotonic()-start_transfer
+                    if received != payload: raise RuntimeError('Benchmark SHA/content mismatch')
+                    measurements.append({'kind':label, 'repeat':repeat, 'bytes':len(payload),
+                        'upload_mib_s':len(payload)/1048576/upload_seconds,
+                        'download_mib_s':len(payload)/1048576/download_seconds,
+                        'sha256':hashlib.sha256(payload).hexdigest()})
+                    print('Verified',label,repeat+1,'upload/download MiB/s',
+                          round(measurements[-1]['upload_mib_s'],3),
+                          round(measurements[-1]['download_mib_s'],3),flush=True)
+            # At least 8 MiB must remain to fill large Dolphin host send buffers,
+            # even when the timing fixture was shortened for diagnosis.
+            if fixture_bytes < 8*1024*1024:
+                hbc.put_file(address,remote,random.Random(43).randbytes(8*1024*1024),level=0)
+            # Keep a download peer connected without draining its receive window.
+            # The app must release its listener through the send watchdog, while
+            # this peer is still open; closing it first would not prove the bound.
+            with hbc.connect(address) as stalled:
+                stalled.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
                 started=time.monotonic()
-                conn.settimeout(15 if a.hardware else 60)
-                try: hbc.recv_reply(conn)
-                except socket.timeout:
-                    raise RuntimeError('App receive deadline did not reject upload: '+failure)
-                except (hbc.HBCError, OSError): pass
-                else: raise RuntimeError('Invalid upload accepted: '+failure)
-                elapsed=time.monotonic()-started
-                print('Rejected',failure,'upload in',round(elapsed,3),'seconds',flush=True)
-                if elapsed > (15 if a.hardware else 60): raise RuntimeError('Upload timeout exceeded')
-            if hbc.get_file(address,remote) != data: raise RuntimeError('Failed upload replaced destination')
-        medians={label:{direction:round(statistics.median(m[direction+'_mib_s'] for m in measurements if m['kind']==label),3)
-                       for direction in ('upload','download')} for label in ('random','compressible')}
-        (profile/'transfer-benchmark.json').write_text(json.dumps({'measurements':measurements,'median_mib_s':medians,
-            'failure_checks':['crc','short','idle','oversize','stalled-download'],
-            'stalled_download_seconds':stalled_download_seconds,'passed':True},indent=2))
-        print('Transfer benchmark median MiB/s:',json.dumps(medians),flush=True)
-    if hbc.status(address).get('app')!='WiiXplorer NG': raise RuntimeError('Controller unexpectedly left WiiXplorer before FTP checks')
-    if a.ftp_smoke:
-        passive_endpoints=[]
-        class SmokeFtp(ftplib.FTP):
-            def makepasv(self):
-                advertised=ftplib.parse227(self.sendcmd('PASV'))
-                endpoint=(advertised[0] if self.trust_server_pasv_ipv4_address else self.sock.getpeername()[0],advertised[1])
-                # Record only endpoints; never enable ftplib command tracing/PASS logs.
-                passive_endpoints.append({'advertised':advertised,'host':endpoint[0],'port':endpoint[1],
-                    'control_peer':self.sock.getpeername(),'control_local':self.sock.getsockname()})
-                (profile/'ftp-passive.json').write_text(json.dumps(passive_endpoints,indent=2)+'\n')
-                return endpoint
-        rejected=ftplib.FTP(timeout=15)
+                stalled.sendall(hbc.file_header('g',remote,flags=0))
+                deadline=started+(20 if a.hardware else 60)
+                while True:
+                    try:
+                        if hbc.is_agent(hbc.version(address,timeout=1)): break
+                    except (OSError,hbc.HBCError): pass
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('Stalled download held the app listener')
+                    time.sleep(.25)
+                stalled_download_seconds=round(time.monotonic()-started,3)
+            # Existing data must survive malformed, truncated, and stalled uploads.
+            hbc.put_file(address,remote,data)
+            for failure in ('crc', 'short', 'idle', 'oversize'):
+                with hbc.connect(address) as conn:
+                    if failure == 'oversize':
+                        conn.sendall(hbc.file_header('p',remote,512*1024*1024+1))
+                    else:
+                        conn.sendall(hbc.file_header('p',remote,4))
+                        if failure == 'crc': conn.sendall(struct.pack('>III',4,4,0)+b'bad!')
+                        elif failure == 'short':
+                            conn.sendall(struct.pack('>III',4,4,zlib.crc32(b'test'))+b't')
+                            conn.shutdown(socket.SHUT_WR)
+                        # idle: wait for the app's bounded receive timeout.
+                    started=time.monotonic()
+                    conn.settimeout(15 if a.hardware else 60)
+                    try: hbc.recv_reply(conn)
+                    except socket.timeout:
+                        raise RuntimeError('App receive deadline did not reject upload: '+failure)
+                    except (hbc.HBCError, OSError): pass
+                    else: raise RuntimeError('Invalid upload accepted: '+failure)
+                    elapsed=time.monotonic()-started
+                    print('Rejected',failure,'upload in',round(elapsed,3),'seconds',flush=True)
+                    if elapsed > (15 if a.hardware else 60): raise RuntimeError('Upload timeout exceeded')
+                if hbc.get_file(address,remote) != data: raise RuntimeError('Failed upload replaced destination')
+            medians={label:{direction:round(statistics.median(m[direction+'_mib_s'] for m in measurements if m['kind']==label),3)
+                           for direction in ('upload','download')} for label in ('random','compressible')}
+            (profile/'transfer-benchmark.json').write_text(json.dumps({'measurements':measurements,'median_mib_s':medians,
+                'failure_checks':['crc','short','idle','oversize','stalled-download'],
+                'stalled_download_seconds':stalled_download_seconds,'passed':True},indent=2))
+            print('Transfer benchmark median MiB/s:',json.dumps(medians),flush=True)
+        if hbc.status(address).get('app')!='WiiXplorer NG': raise RuntimeError('Controller unexpectedly left WiiXplorer before FTP checks')
+        if a.ftp_smoke:
+            passive_endpoints=[]
+            class SmokeFtp(ftplib.FTP):
+                def makepasv(self):
+                    advertised=ftplib.parse227(self.sendcmd('PASV'))
+                    endpoint=(advertised[0] if self.trust_server_pasv_ipv4_address else self.sock.getpeername()[0],advertised[1])
+                    # Record only endpoints; never enable ftplib command tracing/PASS logs.
+                    passive_endpoints.append({'advertised':advertised,'host':endpoint[0],'port':endpoint[1],
+                        'control_peer':self.sock.getpeername(),'control_local':self.sock.getsockname()})
+                    (profile/'ftp-passive.json').write_text(json.dumps(passive_endpoints,indent=2)+'\n')
+                    return endpoint
+            checkpoint('ftp-control')
+            rejected=ftplib.FTP(timeout=15)
+            try:
+                # The SDK listener can answer before the application's bounded
+                # if_config/AutoStart finishes. Wait for FTP itself, not SDK readiness.
+                deadline=time.monotonic()+60
+                while True:
+                    try:
+                        rejected.connect(address,ftp_port,timeout=2)
+                        rejected.sock.settimeout(15)
+                        break
+                    except OSError:
+                        rejected.close()
+                        if time.monotonic()>=deadline: raise
+                        time.sleep(.5)
+                checkpoint('ftp-bad-password')
+                try: rejected.login(ftp_user,ftp_password+'-invalid')
+                except ftplib.error_perm as error:
+                    if not str(error).startswith('530'): raise RuntimeError('Unexpected FTP authentication rejection')
+                else: raise RuntimeError('FTP accepted an incorrect password')
+            finally: rejected.close()
+            checkpoint('ftp-authentication')
+            ftp_connection=SmokeFtp(timeout=15)
+            ftp_connection.connect(address,ftp_port)
+            ftp_connection.login(ftp_user,ftp_password)
+            checkpoint('ftp-list')
+            ftp_devices=ftp_connection.nlst()
+            if 'sd' not in ftp_devices: raise RuntimeError('Mounted SD missing from FTP root')
+            print('FTP mounted devices:', ', '.join(ftp_devices), flush=True)
+            ftp_remote='/sd/'+remote.split(':/',1)[1]
+            payload=random.Random(42).randbytes(1024*1024)
+            hbc.put_file(address,remote,data)
+            ftp_connection.storbinary('STOR '+ftp_remote,io.BytesIO(payload),blocksize=64*1024)
+            out=bytearray()
+            ftp_connection.retrbinary('RETR '+ftp_remote,out.extend,blocksize=64*1024)
+            if out!=payload or hbc.get_file(address,remote)!=payload: raise RuntimeError('FTP roundtrip mismatch')
+            listing=[]
+            ftp_connection.retrlines('LIST /sd',listing.append)
+            if not any(remote.split(':/',1)[1] in row for row in listing): raise RuntimeError('FTP LIST missing uploaded SD fixture')
+            usb=next((dev for dev in ftp_devices if dev in ('usb1','usb2','usb3','usb4','usb5','usb6','usb7','usb8')),None)
+            if usb:
+                usb_remote='/'+usb+'/wiixplorer-ftp-smoke-'+profile.name+'-'+secrets.token_hex(8)+'.bin'
+                ftp_connection.storbinary('STOR '+usb_remote,io.BytesIO(payload))
+                usb_out=bytearray();ftp_connection.retrbinary('RETR '+usb_remote,usb_out.extend)
+                usb_listing=[];ftp_connection.retrlines('LIST /'+usb,usb_listing.append)
+                if usb_out!=payload or not any(usb_remote.rsplit('/',1)[1] in row for row in usb_listing): raise RuntimeError('FTP USB roundtrip/LIST mismatch')
+                ftp_connection.delete(usb_remote)
+                print('FTP USB LIST/RETR/STOR passed:',usb,flush=True)
+            else: print('FTP USB check skipped: no mounted USB device',flush=True)
+            ftp_connection.storbinary('STOR '+ftp_remote,io.BytesIO(b''))
+            if hbc.get_file(address,remote)!=b'': raise RuntimeError('Empty FTP upload failed')
+            ftp_connection.storbinary('STOR '+ftp_remote,io.BytesIO(b'prefix-old'))
+            ftp_connection.storbinary('STOR '+ftp_remote,io.BytesIO(b'new'),rest=7)
+            ftp_connection.storbinary('APPE '+ftp_remote,io.BytesIO(b'-append'))
+            if hbc.get_file(address,remote)!=b'prefix-new-append': raise RuntimeError('FTP append/resume mismatch')
+            hbc.put_file(address,remote,data)
+            ftp_data=ftp_connection.transfercmd('STOR '+ftp_remote)
+            ftp_data.sendall(b'unfinished')
+            # The server uses the guest clock. Captured Dolphin runs can advance
+            # much slower than real time; retain a finite host watchdog without
+            # mistaking 30 guest seconds for 30 host seconds. Timeout still fails.
+            ftp_connection.sock.settimeout(45 if a.hardware else 300)
+            try: ftp_connection.voidresp()
+            except ftplib.error_temp as error:
+                if not str(error).startswith('426'): raise
+            except (EOFError, ConnectionResetError): pass # ftpsrv expires the whole session
+            else: raise RuntimeError('Stalled FTP upload accepted')
+            ftp_data.close();ftp_data=None
+            if hbc.get_file(address,remote)!=data: raise RuntimeError('FTP timeout replaced old destination')
+            ftp_connection.close()
+            checkpoint('ftp-exit-upload')
+            ftp_connection=SmokeFtp(timeout=15);ftp_connection.connect(address,ftp_port)
+            ftp_connection.login(ftp_user,ftp_password)
+            ftp_data=ftp_connection.transfercmd('STOR '+ftp_remote)
+            ftp_data.sendall(b'exit-during-upload')
+            print('FTP bad-password rejection, roundtrip, empty, append/resume and idle preservation passed',flush=True)
+        else:
+            hbc.file_request(address,'D',remote); uploaded = False
+        if hbc.status(address).get('app')!='WiiXplorer NG': raise RuntimeError('Controller unexpectedly left WiiXplorer before transfer checks')
+    if not a.exit_only:
+        # Fetch while mounted. The subsequent clean exit proves the final flush separately.
+        probes = hbc.get_file(address,'sd:/apps/WiiXplorer/probes.csv')
+        (profile/'probes.csv').write_bytes(probes)
         try:
-            # The SDK listener can answer before the application's bounded
-            # if_config/AutoStart finishes. Wait for FTP itself, not SDK readiness.
-            deadline=time.monotonic()+60
-            while True:
-                try:
-                    rejected.connect(address,ftp_port,timeout=2)
-                    rejected.sock.settimeout(15)
-                    break
-                except OSError:
-                    rejected.close()
-                    if time.monotonic()>=deadline: raise
-                    time.sleep(.5)
-            try: rejected.login(ftp_user,ftp_password+'-invalid')
-            except ftplib.error_perm as error:
-                if not str(error).startswith('530'): raise RuntimeError('Unexpected FTP authentication rejection')
-            else: raise RuntimeError('FTP accepted an incorrect password')
-        finally: rejected.close()
-        ftp_connection=SmokeFtp(timeout=15)
-        ftp_connection.connect(address,ftp_port)
-        ftp_connection.login(ftp_user,ftp_password)
-        ftp_devices=ftp_connection.nlst()
-        if 'sd' not in ftp_devices: raise RuntimeError('Mounted SD missing from FTP root')
-        print('FTP mounted devices:', ', '.join(ftp_devices), flush=True)
-        ftp_remote='/sd/'+remote.split(':/',1)[1]
-        payload=random.Random(42).randbytes(1024*1024)
-        hbc.put_file(address,remote,data)
-        ftp_connection.storbinary('STOR '+ftp_remote,io.BytesIO(payload),blocksize=64*1024)
-        out=bytearray()
-        ftp_connection.retrbinary('RETR '+ftp_remote,out.extend,blocksize=64*1024)
-        if out!=payload or hbc.get_file(address,remote)!=payload: raise RuntimeError('FTP roundtrip mismatch')
-        listing=[]
-        ftp_connection.retrlines('LIST /sd',listing.append)
-        if not any(remote.split(':/',1)[1] in row for row in listing): raise RuntimeError('FTP LIST missing uploaded SD fixture')
-        usb=next((dev for dev in ftp_devices if dev in ('usb1','usb2','usb3','usb4','usb5','usb6','usb7','usb8')),None)
-        if usb:
-            usb_remote='/'+usb+'/wiixplorer-ftp-smoke-'+profile.name+'-'+secrets.token_hex(8)+'.bin'
-            ftp_connection.storbinary('STOR '+usb_remote,io.BytesIO(payload))
-            usb_out=bytearray();ftp_connection.retrbinary('RETR '+usb_remote,usb_out.extend)
-            usb_listing=[];ftp_connection.retrlines('LIST /'+usb,usb_listing.append)
-            if usb_out!=payload or not any(usb_remote.rsplit('/',1)[1] in row for row in usb_listing): raise RuntimeError('FTP USB roundtrip/LIST mismatch')
-            ftp_connection.delete(usb_remote)
-            print('FTP USB LIST/RETR/STOR passed:',usb,flush=True)
-        else: print('FTP USB check skipped: no mounted USB device',flush=True)
-        ftp_connection.storbinary('STOR '+ftp_remote,io.BytesIO(b''))
-        if hbc.get_file(address,remote)!=b'': raise RuntimeError('Empty FTP upload failed')
-        ftp_connection.storbinary('STOR '+ftp_remote,io.BytesIO(b'prefix-old'))
-        ftp_connection.storbinary('STOR '+ftp_remote,io.BytesIO(b'new'),rest=7)
-        ftp_connection.storbinary('APPE '+ftp_remote,io.BytesIO(b'-append'))
-        if hbc.get_file(address,remote)!=b'prefix-new-append': raise RuntimeError('FTP append/resume mismatch')
-        hbc.put_file(address,remote,data)
-        ftp_data=ftp_connection.transfercmd('STOR '+ftp_remote)
-        ftp_data.sendall(b'unfinished')
-        # The server uses the guest clock. Captured Dolphin runs can advance
-        # much slower than real time; retain a finite host watchdog without
-        # mistaking 30 guest seconds for 30 host seconds. Timeout still fails.
-        ftp_connection.sock.settimeout(45 if a.hardware else 300)
-        try: ftp_connection.voidresp()
-        except ftplib.error_temp as error:
-            if not str(error).startswith('426'): raise
-        except (EOFError, ConnectionResetError): pass # ftpsrv expires the whole session
-        else: raise RuntimeError('Stalled FTP upload accepted')
-        ftp_data.close();ftp_data=None
-        if hbc.get_file(address,remote)!=data: raise RuntimeError('FTP timeout replaced old destination')
-        ftp_connection.close()
-        ftp_connection=SmokeFtp(timeout=15);ftp_connection.connect(address,ftp_port)
-        ftp_connection.login(ftp_user,ftp_password)
-        ftp_data=ftp_connection.transfercmd('STOR '+ftp_remote)
-        ftp_data.sendall(b'exit-during-upload')
-        print('FTP bad-password rejection, roundtrip, empty, append/resume and idle preservation passed',flush=True)
-    else:
-        hbc.file_request(address,'D',remote); uploaded = False
-    if hbc.status(address).get('app')!='WiiXplorer NG': raise RuntimeError('Controller unexpectedly left WiiXplorer before transfer checks')
-    # Fetch while mounted. The subsequent clean exit proves the final flush separately.
-    probes = hbc.get_file(address,'sd:/apps/WiiXplorer/probes.csv')
-    (profile/'probes.csv').write_bytes(probes)
-    try:
-        memory_probes=hbc.get_file(address,'sd:/apps/WiiXplorer/memory-probes.csv')
-        (profile/'memory-probes.csv').write_bytes(memory_probes)
-    except hbc.HBCError as error:
-        if error.code != hbc.ENOENT: raise
+            memory_probes=hbc.get_file(address,'sd:/apps/WiiXplorer/memory-probes.csv')
+            (profile/'memory-probes.csv').write_bytes(memory_probes)
+        except hbc.HBCError as error:
+            if error.code != hbc.ENOENT: raise
+    checkpoint('exit-request')
     key('h') # Also check remote exit while inside the overlay.
     start = time.monotonic()
     hbc.request(address,b'HBCX')
+    checkpoint('exit-wait')
     if a.hardware:
         version = hbc.hbc_wait(address,30)
         (profile/'hbc-after.json').write_text(json.dumps(hbc.status(address),indent=2))
@@ -550,11 +573,22 @@ try:
             with (profile/'Logs/dolphin.log').open('rb') as log:
                 log.seek(0,2);log.seek(max(0,log.tell()-65536))
                 tail=log.read().decode(errors='replace')
-            if 'Shutdown complete ----' in tail: break
+            if (profile/'Logs/dolphin.log').stat().st_size > a.max_log_mib * 1024 * 1024:
+                raise RuntimeError('Dolphin log budget exceeded; retain first fault evidence')
             if 'Unknown instruction' in tail or 'exception' in tail.lower():
                 raise RuntimeError('Guest fault during loader return; see Dolphin log')
+            if 'Shutdown complete ----' in tail: break
             if time.monotonic()-start>60: raise RuntimeError('Dolphin core shutdown did not complete')
             time.sleep(.25)
+    if a.exit_only and not a.hardware:
+        # The initial periodic flush may not have happened before minimal exit.
+        # ExitApp flushes final probes; Dolphin then syncs SD before core shutdown.
+        probe_path=profile/'Load/WiiSDSync/apps/WiiXplorer/probes.csv'
+        with probe_path.open('rb') as stream:
+            final_probes=stream.read(65537)
+        if len(final_probes)>65536: raise RuntimeError('Final probe report exceeds budget')
+        (profile/'probes.csv').write_bytes(final_probes)
+    checkpoint('probe-validation')
     with (profile/'probes.csv').open(newline='') as stream:
         rows=list(csv.DictReader(stream))
     if not rows: raise RuntimeError('No probe records')
@@ -578,9 +612,10 @@ try:
         if row['group'] in ('cpu','gpu') and row['level']=='3' and int(row['value']):
             raise RuntimeError('Heap/GPU integrity check failed')
     result={'file_bytes':len(data), 'sha256':hashlib.sha256(data).hexdigest(),
-            'remote_exit_seconds':round(time.monotonic()-start,3), 'ftp_passed':a.ftp_smoke, 'ftp_devices':ftp_devices, 'passed':True}
+            'remote_exit_seconds':round(time.monotonic()-start,3), 'ftp_passed':a.ftp_smoke, 'ftp_devices':ftp_devices, 'exit_only':a.exit_only, 'passed':True}
     (profile/'hbc-smoke.json').write_text(json.dumps(result,indent=2))
-    print('Agent overlay, settings/diagnostics buttons, file roundtrip and exit passed',flush=True)
+    checkpoint('complete')
+    print('Minimal HOME/exit passed' if a.exit_only else 'Agent overlay, settings/diagnostics buttons, file roundtrip and exit passed',flush=True)
 finally:
     capture_error=None
     if capture_process:
@@ -593,7 +628,7 @@ finally:
     if log_server: log_server.close()
     if ftp_data: ftp_data.close()
     if ftp_connection: ftp_connection.close()
-    if not a.hardware and sys.exc_info()[0] is not None:
+    if not a.hardware and not a.exit_only and sys.exc_info()[0] is not None:
         try:
             status=hbc.status(address)
             (profile/'failure-status.json').write_text(json.dumps(status,indent=2)+'\n')
@@ -607,7 +642,7 @@ finally:
         if uploaded:
             try: hbc.file_request(address,'D',remote)
             except (OSError,hbc.HBCError): pass
-        if sys.exc_info()[0] is not None:
+        if not a.exit_only and sys.exc_info()[0] is not None:
             try:
                 (profile/'failure-status.json').write_text(json.dumps(hbc.status(address),indent=2)+'\n')
                 width,height,pixels=hbc.screen(address)

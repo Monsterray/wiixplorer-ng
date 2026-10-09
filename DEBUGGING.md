@@ -663,3 +663,54 @@ reverted. Diagnose the first guest exception before changing loader behavior.
 The controller requires Dolphin's core shutdown marker before closing the
 window; guest faults or a missing marker fail the gate and prevent hardware
 submission. Cleanup stops only the controller's owned Dolphin profile.
+
+## Bounded diagnostic loops (0.1.15)
+
+Use the smallest scenario first:
+
+```sh
+python3 scripts/validate-bench.py exit --repeat 3 --smoke-timeout 120 --max-log-mib 16
+python3 scripts/diagnose.py inspect build/dolphin.PROFILE --output build/diagnostics/exit.json
+python3 scripts/diagnose.py inventory build --limit 100 --output build/diagnostics/index.json
+```
+
+Repeats build once, require the identical DOL hash, run sequentially, and stop at
+first failure. `--skip-build` uses the existing debug build. The `exit` scenario
+checks status, opens HOME and requests exit without screenshots or a file
+roundtrip. No new runtime probes, socket policy or memory placement is added.
+Add `--hardware` only when that exact Dolphin gate passes; the controller always
+submits through the shared Wii queue and retains settings-restoration behavior.
+Other existing scenarios (`ftp`, `features`, `media`, `archive`, `copy`, `memory`)
+use the same stage and evidence records. Host smoke timeout is configurable from
+30 to 3600 seconds; it does not establish a deadline for an IOS/filesystem call.
+
+Each ignored `build/validation-*` directory has `result.json` with the first
+failed stage, per-stage timing/return status, DOL hash and queue job, plus
+`diagnostics.json` with artifact verification and bounded first-fault context.
+The scenario checkpoint identifies startup, FTP control/auth/list, exit request,
+exit wait and probe validation without recording commands or passwords. Queued
+job failures retain their private hardware profile and last checkpoint when available.
+Cleanup gets separate logs and cannot overwrite the original stop failure.
+Forced owned-profile cleanup preserves the failed verdict; no unrelated process
+is stopped. Commands/passwords are omitted from compact evidence. PASS/auth
+fields are redacted from context; private FTP fixture settings remain ignored.
+
+The inspector scans lines incrementally (16 KiB line bound, default 64 MiB
+complete-log budget). A fault retains eight preceding and sixteen following
+lines, truncated/redacted to 2 KiB each. It stops after that context rather than
+reading a multi-gigabyte repeated exception log. Missing shutdown markers,
+partial scans, oversized lines or changed artifact hashes cannot pass. Select
+`--max-log-mib 1..1024` for larger legitimate captures. An inspector clean
+shutdown verdict is not feature acceptance: use the full scenario gate.
+Bounded feature/media/archive case summaries distinguish a failed member from
+a subsequent exit failure. Missing/malformed reports cannot assert acceptance.
+Legacy inventory entries retain their original verdict and explicitly say when
+no stage was recorded. Historical passes do not accept the current binary.
+
+The live minimal 0.1.15 loop reproduced `ISI exception at 0x00000000` during
+`exit-wait` in `build/validation-20261008-172214-3dgs9jy0` and
+`build/validation-20261008-172447-6od2n15t`. Cleanup and frozen hashes were valid;
+the gate failed and no Wii job was submitted. This proves the feedback loop,
+not a fix or a root cause. An initial run also exposed a controller assumption
+that startup probes already existed; minimal exit now reads the final SD probe
+flush after teardown, with a regression covering an absent initial report.

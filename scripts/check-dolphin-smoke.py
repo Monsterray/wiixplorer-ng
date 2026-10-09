@@ -2,32 +2,25 @@
 """Require guest teardown and valid probe output, not merely a successful launch."""
 import argparse
 import csv
-import hashlib
 import json
-import re
 from pathlib import Path
 import sys
+from diagnose import collect
 
 p = argparse.ArgumentParser()
 p.add_argument('profile', type=Path)
 p.add_argument('--probes', type=Path, help='extracted CSV for raw-SD runs')
+p.add_argument('--max-log-mib', type=int, default=64)
 a = p.parse_args()
+if not 1 <= a.max_log_mib <= 1024: p.error("Log budget must be 1..1024 MiB")
 profile = a.profile
 try:
     info = json.loads((profile/'artifacts/build-info.json').read_text())
     if info['config'] != 'debug': raise ValueError('Smoke validation requires a debug build')
-    for line in (profile/'artifacts/SHA256SUMS').read_text().splitlines():
-        digest, name = line.split('  ', 1)
-        if Path(name).name != name: raise ValueError('Invalid artifact name')
-        if hashlib.sha256((profile/'artifacts'/name).read_bytes()).hexdigest() != digest:
-            raise ValueError('Frozen artifact hash mismatch: '+name)
-    log = (profile/'Logs/dolphin.log').read_text(errors='replace')
-    faults=re.findall(r'^.*(?:\b(?:DSI|ISI|machine check|program|alignment|FPU unavailable) exception\b|exception \((?:DSI|ISI)\)|unknown instruction|GFX FIFO: Unknown Opcode|unable to resolve (?:read|write) address|invalid (?:read|write) (?:from|to)|panic alert|stack dump|backtrace:).*$',log,re.IGNORECASE|re.MULTILINE)
-    if faults: raise ValueError('Guest exception/error recorded: '+faults[0].strip())
-    if 'WiiXplorer: shutdown cleanup completed'  not in log:
-        raise ValueError('Guest did not report completed teardown')
-    if 'Shutdown complete ----' not in log:
-        raise ValueError('Dolphin did not report completed core shutdown')
+    evidence = collect(profile, a.max_log_mib * 1024 * 1024)
+    if evidence['artifact_errors']: raise ValueError(evidence['artifact_errors'][0])
+    if evidence['log']['verdict'] != 'clean_shutdown':
+        raise ValueError('Dolphin validation failed: '+evidence['log']['verdict']+' '+(evidence['log']['first_fault'] or ''))
     if info['probe_level']:
         path = a.probes or profile/'Load/WiiSDSync/apps/WiiXplorer/probes.csv'
         with path.open(newline='') as f:

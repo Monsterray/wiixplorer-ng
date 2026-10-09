@@ -17,7 +17,7 @@ if os.environ.get('ABSENT_ORIGINAL'):original={}
 files=dict(original)
 directories={'sd:/apps'} if os.environ.get('ABSENT_ORIGINAL') else {'sd:/apps','sd:/apps/WiiXplorer'}
 original_dirs=set(directories)
-agent=False
+agent=bool(os.environ.get('PROFILE_TEST'))
 checks=0
 csv=b'window,group,level,count,timed_count,total_us,max_us,value\n0,cpu,3,1,0,0,0,0\n'
 def status(address):
@@ -89,7 +89,9 @@ def send(address,path,args):
  time.monotonic=lambda:0
 
 def foreign_app_check(address): pass
-def screen(address):return 640,480,b'picture'
+def screen(address):
+ assert not os.environ.get('EXIT_ONLY'), 'minimal exit must not capture screenshots'
+ return 640,480,b'picture'
 def yuyv_png(*args):return b'png'
 def send_keys(*args):pass
 def transport(path):
@@ -97,7 +99,9 @@ def transport(path):
   assert not path.startswith('usb1:/'), 'HBC has no usb1 mount'
   return path.replace('usb:/','usb1:/',1)
  return path
-def put_file(address,path,data): files[transport(path)]=data
+def put_file(address,path,data):
+ assert not os.environ.get('EXIT_ONLY') or 'wiixplorer-test-agent' not in path, 'minimal exit must not upload a roundtrip'
+ files[transport(path)]=data
 def get_file(address,path):
  path=transport(path)
  if os.environ.get('FAIL_TRANSFER') and 'wiixplorer-test-agent' in path: raise RuntimeError('transfer failure')
@@ -120,14 +124,20 @@ def file_request(address,op,path):
  raise RuntimeError(op)
 def request(address,header):
  global agent
- assert header==b'HBCX';agent=False;return b''
+ assert header==b'HBCX';agent=False
+ if os.environ.get('PROFILE_TEST'):
+  from pathlib import Path
+  p=Path(os.environ['PROFILE_TEST']);sd=p/'Load/WiiSDSync/apps/WiiXplorer';sd.mkdir(parents=True,exist_ok=True)
+  (sd/'probes.csv').write_bytes(csv)
+  (p/'Logs/dolphin.log').write_text('WiiXplorer: shutdown cleanup completed\nShutdown complete ----\n')
+ return b''
 def hbc_wait(*args):assert not agent;return 'test HBC'
 def exit_app(*args):
  global agent
  agent=False
 @atexit.register
 def validate():
- assert checks>=2 and not agent
+ assert checks>=(1 if os.environ.get("PROFILE_TEST") else 2) and not agent
  if os.environ.get('ARCHIVE_LEFTOVER'):
   leftovers={k:v for k,v in files.items() if k not in original};assert len(leftovers)==1 and next(iter(leftovers)).endswith('/retained')
   assert all(files[k]==v for k,v in original.items()) and len(directories)==len(original_dirs)+1
@@ -160,7 +170,21 @@ def generate(root):
         result=subprocess.run(args,env=env,capture_output=True,text=True)
         assert result.returncode==int(failure),result.stdout+result.stderr
         assert 'SD originals restored' in result.stdout,result.stdout+result.stderr
-    helper=root/'build/tools/wii-capture';helper.parent.mkdir()
+    env=dict(os.environ,WII_BENCH_JOB_START='1',WII_BENCH_IP='lease-only-test',EXIT_ONLY='1')
+    result=subprocess.run(['python3',str(root/'scripts/hbc-smoke.py'),'--hardware','--exit-only'],env=env,capture_output=True,text=True)
+    assert result.returncode==0 and 'Minimal HOME/exit passed' in result.stdout,result.stdout+result.stderr
+    assert 'SD originals restored' in result.stdout
+    # Minimal Dolphin exit must consume the final flush, not demand a startup CSV.
+    profile=root/'build/dolphin.fixture';(profile/'Logs').mkdir(parents=True)
+    (profile/'Logs/dolphin.log').write_text('starting\n')
+    script=root/'scripts/hbc-smoke.py'
+    text=script.read_text();start=text.index('    with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as udp:');end=text.index('\n\nremote =',start)
+    script.write_text(text[:start]+"    address = 'fixture'"+text[end:])
+    env=dict(os.environ,PROFILE_TEST=str(profile),EXIT_ONLY='1')
+    result=subprocess.run(['python3',str(script),'--profile',str(profile),'--exit-only'],env=env,capture_output=True,text=True)
+    assert result.returncode==0 and 'Minimal HOME/exit passed' in result.stdout,result.stdout+result.stderr
+    assert (profile/'probes.csv').read_bytes().startswith(b'window,group')
+    helper=root/'build/tools/wii-capture' ;helper.parent.mkdir()
     helper.write_text("#!/usr/bin/env python3\nimport os,signal,sys,time\nsignal.signal(signal.SIGTERM,lambda *args:sys.exit(int(os.environ.get('FAIL_CAPTURE_CLOSE','0'))))\nwhile True:time.sleep(1)\n")
     helper.chmod(0o755)
     for failed_close in (False,True):

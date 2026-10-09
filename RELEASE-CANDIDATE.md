@@ -1,4 +1,4 @@
-# WiiXplorer NG 0.1.13 testing build
+# WiiXplorer NG 0.1.15 testing build
 
 Not a validated release candidate. FTP and intermittent Dolphin exit failures
 remain release blockers. The build is provided for controlled local testing.
@@ -86,3 +86,7 @@ hardware workflow.
 * Format only explicitly disposable media. NAND access stays hidden/read-only
   according to settings. These destructive/platform-specific paths are not
   exercised on the shared development Wii merely to check a box.
+
+Diagnostic automation in 0.1.15 adds bounded first-fault evidence, exact-DOL
+repeat checks and a minimal HOME/exit scenario. Earlier successful jobs above
+remain historical; automation improvements do not fix the open runtime blockers.
