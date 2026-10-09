@@ -36,7 +36,7 @@ for failure in (None, 'dolphin-check', 'hardware', 'stop', 'ftp', 'timeout'):
             if 'add' in command:
                 kwargs['stdout'].write('fixture-job\n')
         with patch.dict(main.__globals__, ROOT=root), patch('sys.argv',
-                ['validate-bench.py', 'ftp' if failure=='ftp' else 'media', '--hardware', '--skip-build']), patch('subprocess.run', side_effect=run):
+                ['validate-bench.py', 'ftp' if failure=='ftp' else 'media', '--hardware', '--skip-build', '--cpu-core', 'jit']), patch('subprocess.run', side_effect=run):
             try: main()
             except SystemExit as error: assert error.code==1 and failure in ('dolphin-check','hardware','stop','timeout')
             else: assert failure in (None,'ftp')
@@ -45,6 +45,7 @@ for failure in (None, 'dolphin-check', 'hardware', 'stop', 'ftp', 'timeout'):
         prepare=next(i for i,c in enumerate(commands) if '--prepare-only' in c)
         port=next(i for i,c in enumerate(commands) if 'scripts/hbc-port.py' in c)
         assert prepare<port<commands.index(launch)
+        assert commands[prepare][commands[prepare].index('--cpu-core')+1] == 'jit'
         queued = [command for command in commands if 'add' in command]
         assert bool(queued) == (failure not in ('dolphin-check','stop','timeout'))
         if queued:
@@ -54,6 +55,7 @@ for failure in (None, 'dolphin-check', 'hardware', 'stop', 'ftp', 'timeout'):
         assert commands[-1][-2:] == ['--force-stop' if failure=='stop' else '--stop', str(profile)]
         result = json.loads(next((root/'build').glob('validation-*/result.json')).read_text())
         assert result['passed'] == (failure in (None,'ftp'))
+        assert result['cpu_core'] == 'jit'
         assert ('cleanup_error' in result)==(failure=='stop')
         assert result['steps'] and all('seconds' in step for step in result['steps'])
         assert (next((root/'build').glob('validation-*/diagnostics.json'))).exists()
@@ -83,3 +85,10 @@ for change in (False, True):
         results=[json.loads(p.read_text()) for p in sorted((root/'build').glob('validation-*/result.json'))]
         if change:assert any(r.get('failure_stage')=='artifact' for r in results)
 print('Validation repeats: minimal exit, frozen DOL stability and no launch after changed artifact passed')
+
+with patch('sys.argv', ['validate-bench.py', 'ftp', '--hardware', '--cpu-core', 'interpreter']), patch('subprocess.run') as runner:
+    try: main()
+    except SystemExit as error: assert error.code == 2
+    else: raise AssertionError('Interpreter diagnostic must not queue hardware')
+    runner.assert_not_called()
+print('Interpreter-only hardware gate rejected before build/launch/queue')

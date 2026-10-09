@@ -714,3 +714,47 @@ the gate failed and no Wii job was submitted. This proves the feedback loop,
 not a fix or a root cause. An initial run also exposed a controller assumption
 that startup probes already existed; minimal exit now reads the final SD probe
 flush after teardown, with a regression covering an absent initial report.
+
+### Loader/JIT isolation (2026-10-08)
+
+`python3 scripts/dolphin-loader-repro.py --repeat 3` builds the small production
+libogc fixture in `tests/fixtures/dolphin_loader_exit.c`, freezes its source/DOL,
+and runs separate JIT and interpreter profiles. It initializes video, waits for
+two VSyncs and calls `exit(0)`; no WiiXplorer code, HBC SDK, filesystem or FTP
+runs. Each result records CPU mode, hash, owned profile and bounded log evidence.
+A guest fault remains a failure even when core shutdown completes. This is an
+emulator diagnostic, not application acceptance or a physical performance test.
+
+The initial no-report fixture (`dolphin.p9KJcz`) reproduced the application's
+`ISI exception at 0x00000000` during core shutdown on installed Dolphin 2606a.
+A libogc-only immediate exit and system-menu-reset/exit did not reproduce it in
+single runs. Adding `SYS_Report` immediately before exit made three JIT and
+three interpreter runs pass; the saved fixture deliberately omits that report. Its repeated no-report run
+(`loader-repro-k9bymrdj`) failed both JIT cases and passed both interpreter cases.
+This narrows the zero-address loader fault to emulator execution/timing behavior,
+rather than proving WiiXplorer cleanup or the SDK causes it. It does not establish
+that other historical unknown-instruction faults have the same cause.
+
+GDB with debugger mode captured `main -> Sys_ExecuteExit -> PerformHBC ->
+IsFromHBC`, `ExitHBC`, an intact stack, and the zero instruction word followed by
+`STUBHAXX` at `0x80001800`. The application rejects that stub, tries HBC titles,
+then calls `SYS_ResetSystem(SYS_RETURNTOMENU)`. That call returns in this empty
+Dolphin NAND; main returns into libogc exit and `SYS_ResetSystem(SYS_SHUTDOWN)`.
+A signature-only application change still reproduced the fault and was reverted.
+No application loader workaround is shipped.
+
+Upstream [HBReload](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/Core/HLE/HLE_Misc.cpp)
+requests CPU break and host stop without assigning `ppc_state.npc`;
+[JIT function replacement](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/Core/PowerPC/Jit64/Jit.cpp)
+reads that next-PC field for its exit destination. This is a candidate emulator
+fix boundary; it has not been verified by a patched Dolphin build.
+
+`--gdb-port` now also enables Dolphin's `-d` debugger mode. Connecting GDB alone
+with batch mode did not activate the tested guest breakpoints. Both software and
+hardware execute breakpoints then worked in debugger mode. The debugger window
+may require owned `--force-stop` after guest core shutdown; do not kill other
+Dolphin instances. `--cpu-core jit|interpreter` is available in `dolphin.sh` and
+`validate-bench.py`, with JIT the default. Validation records the selected mode;
+there is no automatic retry in a different mode or suppression of exceptions.
+An interpreter pass does not clear the normal-JIT release blocker. The validation
+runner rejects `--hardware --cpu-core interpreter` before launching or queuing.

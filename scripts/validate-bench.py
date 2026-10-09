@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def validate(args, expected_hash=None):
     run = Path(tempfile.mkdtemp(prefix=time.strftime('validation-%Y%m%d-%H%M%S-'), dir=ROOT/'build'))
-    summary = {'schema': 1, 'bench': args.bench, 'passed': False, 'steps': []}
+    summary = {'schema': 1, 'bench': args.bench, 'cpu_core': args.cpu_core,
+               'passed': False, 'steps': []}
     active_stage = None
 
     def step(name, command, timeout=600):
@@ -42,7 +43,8 @@ def validate(args, expected_hash=None):
     try:
         if not args.skip_build:
             step('build', ['make', '-j4', 'debug', 'PROBE_LEVEL=3'])
-        prepare = ['bash', 'scripts/dolphin.sh', '--build', 'debug', '--prepare-only']
+        prepare = ['bash', 'scripts/dolphin.sh', '--build', 'debug', '--prepare-only',
+                   '--cpu-core', args.cpu_core]
         if args.bench != 'exit': prepare.append('--capture')
         if args.bench == 'ftp':
             password = secrets.token_hex(12)
@@ -129,11 +131,15 @@ def main():
     parser.add_argument('--capture-device', help='HDMI capture device ID for the queued Wii job')
     parser.add_argument('--wait-port', type=int, default=300)
     parser.add_argument('--skip-build', action='store_true')
+    parser.add_argument('--cpu-core', choices=('jit', 'interpreter'), default='jit',
+                        help='explicit Dolphin mode; guest faults still fail the gate')
     parser.add_argument('--repeat', type=int, default=1, help='1..100 sequential repeats; stop on first failure')
     parser.add_argument('--smoke-timeout', type=int, default=600, help='host smoke watchdog, 30..3600 seconds')
     parser.add_argument('--max-log-mib', type=int, default=64, help='complete scan budget, 1..1024 MiB')
     parser.add_argument('--queue-client', type=Path, default=Path(os.environ.get('WII_BENCH_CLIENT', str(ROOT/'.deps/prefix/bin/wiibench.py'))))
     args = parser.parse_args()
+    if args.hardware and args.cpu_core != 'jit':
+        parser.error('Hardware requires the normal-JIT gate; interpreter mode is diagnostic only')
     if not 0<=args.wait_port<=3600 or not 1<=args.repeat<=100 or not 30<=args.smoke_timeout<=3600 or not 1<=args.max_log_mib<=1024:
         parser.error('Wait/repeat/timeout/log budget out of bounds')
     if args.capture_device and (not args.hardware or sys.platform != 'darwin'):

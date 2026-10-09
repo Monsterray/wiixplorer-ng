@@ -8,6 +8,7 @@ seconds=0
 capture=false
 smoke_frames=
 gdb_port=
+cpu_core=jit
 config_seed=
 sd_image=
 bench=
@@ -19,17 +20,19 @@ while [ "$#" -gt 0 ]; do
         --capture) capture=true ;;
         --smoke-frames) shift; smoke_frames=${1:?frame count required} ;;
         --build) shift; build_config=${1:?debug or release required} ;;
-        --gdb-port) shift; gdb_port=${1:?port required} ;;
+        --gdb-port) shift; gdb_port=${1:?port required}; debugger=true ;;
+        --cpu-core) shift; cpu_core=${1:?jit or interpreter required} ;;
         --config-seed) shift; config_seed=${1:?configuration file required} ;;
         --bench) shift; bench=${1:?archive, memory, storage, copy, media or features required} ;;
         --sd-image) shift; sd_image=${1:?image required} ;;
         --seconds) shift; seconds=${1:?seconds required} ;;
         --status|--stop|--force-stop|--stop-all) exec python3 "$root/scripts/dolphin-process.py" "$1" ;;
-        *) printf 'Usage: %s [--build debug|release] [--prepare-only] [--debug] [--capture] [--seconds N] [--smoke-frames N] [--gdb-port PORT] [--bench archive|memory|storage|copy|media|features] [--sd-image PATH] [--config-seed PATH] [--status|--stop|--force-stop|--stop-all]\n' "$0" >&2; exit 2 ;;
+        *) printf 'Usage: %s [--build debug|release] [--prepare-only] [--debug] [--capture] [--seconds N] [--smoke-frames N] [--gdb-port PORT] [--cpu-core jit|interpreter] [--bench archive|memory|storage|copy|media|features] [--sd-image PATH] [--config-seed PATH] [--status|--stop|--force-stop|--stop-all]\n' "$0" >&2; exit 2 ;;
     esac
     shift
 done
 case "$build_config" in debug|release) ;; *) printf 'Build must be debug or release.\n' >&2; exit 2 ;; esac
+case "$cpu_core" in jit) cpu_id=1 ;; interpreter) cpu_id=0 ;; *) printf 'CPU core must be jit or interpreter.\n' >&2; exit 2 ;; esac
 if [ -n "$smoke_frames" ]; then
     if [ "$build_config" != debug ]; then printf 'Smoke frames require a debug build.\n' >&2; exit 2; fi
     python3 -c 'import sys; assert 1 <= int(sys.argv[1]) <= 36000' "$smoke_frames"
@@ -103,6 +106,7 @@ case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) boot=$(cygpath -w "$boot"); profile=$(cygpath -w "$profile") ;;
 esac
 args=(-e "$boot" -u "$profile"
+    -C "Dolphin.Core.CPUCore=$cpu_id"
     -C Dolphin.Core.MMU=True -C Dolphin.Core.OverrideBootIOS=58
     -C Dolphin.Core.CPUThread=False -C Dolphin.Core.WiiSDCard=True
     -C Dolphin.Core.WiiSDCardAllowWrites=True -C Dolphin.Core.WiiSDCardEnableFolderSync=True

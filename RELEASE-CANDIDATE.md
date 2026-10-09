@@ -1,4 +1,4 @@
-# WiiXplorer NG 0.1.15 testing build
+# WiiXplorer NG 0.1.16 testing build
 
 Not a validated release candidate. FTP and intermittent Dolphin exit failures
 remain release blockers. The build is provided for controlled local testing.
@@ -90,3 +90,12 @@ hardware workflow.
 Diagnostic automation in 0.1.15 adds bounded first-fault evidence, exact-DOL
 repeat checks and a minimal HOME/exit scenario. Earlier successful jobs above
 remain historical; automation improvements do not fix the open runtime blockers.
+
+Diagnostics in 0.1.16 isolate the zero-address shutdown exception with a tiny
+libogc-only video/exit fixture: two normal-JIT failures and two interpreter
+passes on Dolphin 2606a. A report before exit changes reproduction, so the saved
+fixture omits it. GDB launch now enables debugger mode; CPU selection is explicit
+and recorded. No application exit workaround or native FTP fix is claimed.
+See DEBUGGING.md for reproduction and the unverified Dolphin next-PC hypothesis.
+Normal-JIT exceptions still fail acceptance; no physical test was submitted
+through an interpreter-only gate.
