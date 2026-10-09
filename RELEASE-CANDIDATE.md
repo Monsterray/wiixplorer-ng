@@ -1,4 +1,4 @@
-# WiiXplorer NG 0.1.16 testing build
+# WiiXplorer NG 0.1.17 testing build
 
 Not a validated release candidate. FTP and intermittent Dolphin exit failures
 remain release blockers. The build is provided for controlled local testing.
@@ -104,3 +104,13 @@ The latest 0.1.16 interpreter FTP diagnostic reached the SD protocol assertions
 but failed the unfinished-upload timeout response watchdog. The SDK remained
 responsive during that wait. It is a failed test, not FTP acceptance; USB and
 native FTP remain unconfirmed. All owned Dolphin processes were closed.
+
+Version 0.1.17 updates the pinned SDK/clients to upstream HBC-Reborn 1.10.2 and
+uses its stop API, retaining local transfer and allocator safeguards. Shared
+workstation tools follow the canonical upstream checkout and existing dev queue.
+This dependency update does not establish a fix for the FTP or Dolphin blockers;
+no installed channel update or physical validation is implied.
+
+Three repeated normal-JIT Dolphin startup/HOME/exit checks passed for the same
+0.1.17 debug DOL with the 1.10.2 SDK. These are lifecycle checks; they do not
+supersede the separate minimal Dolphin loader fault or native FTP failures.

@@ -87,7 +87,7 @@ void HbcAgentInit()
     config.on_exit_choice = ExitChoice;
     config.on_frame = UpdateInfo;
     s32 result = hbc_agent_init(&config);
-    ready = true; // A failed listener start still installed the log hook.
+    ready = result >= 0; // Current SDK rolls back all hooks on init failure.
     if (result < 0) printf("HBC agent listener unavailable: %d\n", result);
     static const hbc_agent_item settings[] = {
         {"Save settings", NULL, SaveSettingsButton, NULL, 0},
@@ -109,7 +109,8 @@ void HbcAgentInit()
 void HbcAgentShutdown()
 {
     if (!ready) return;
-    hbc_agent_shutdown();
+    s32 result = hbc_agent_stop();
+    if (result < 0) printf("HBC agent stop incomplete: %d\n", result);
 #if WX_DEBUG_BUILD
     hbc_netlog_close();
 #endif

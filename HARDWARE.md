@@ -38,7 +38,7 @@ pointer. Converting an address neither allocates memory nor transfers ownership.
 
 `Application.cpp` requests a 52 MiB MEM2 pool. `mem2.cpp` respects the live arena,
 starts no earlier than `0x90200000`, caps the upper end at `0x93300000`, and
-splits allocation around HBC-Reborn's retained range. With the pinned 1.10.0
+splits allocation around HBC-Reborn's retained range. With the pinned 1.10.2
 SDK, `[0x91800000, 0x91801140)` reserves 4,416 bytes for netlog/crash/last-log.
 Physical capacity, unallocated SYS arena, allocator-free payload and largest
 contiguous allocation are different quantities. They cannot be added into an

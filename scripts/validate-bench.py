@@ -136,7 +136,10 @@ def main():
     parser.add_argument('--repeat', type=int, default=1, help='1..100 sequential repeats; stop on first failure')
     parser.add_argument('--smoke-timeout', type=int, default=600, help='host smoke watchdog, 30..3600 seconds')
     parser.add_argument('--max-log-mib', type=int, default=64, help='complete scan budget, 1..1024 MiB')
-    parser.add_argument('--queue-client', type=Path, default=Path(os.environ.get('WII_BENCH_CLIENT', str(ROOT/'.deps/prefix/bin/wiibench.py'))))
+    shared_client = Path.home()/'.wii-bench/wiibench.py'
+    default_client = shared_client if shared_client.is_file() else ROOT/'.deps/prefix/bin/wiibench.py'
+    parser.add_argument('--queue-client', type=Path,
+                        default=Path(os.environ.get('WII_BENCH_CLIENT', str(default_client))))
     args = parser.parse_args()
     if args.hardware and args.cpu_core != 'jit':
         parser.error('Hardware requires the normal-JIT gate; interpreter mode is diagnostic only')

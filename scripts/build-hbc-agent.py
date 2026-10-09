@@ -9,8 +9,8 @@ import subprocess
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
-REVISION = 'a797ba98539e863a47409bfd8d62e4cf43f84d9d'
-SHA256 = 'ba7021289fb10368323f39e9707e9cfd4002fd84ab01fc612063cbb260cb6b4c'
+REVISION = '0c2e3d9f7f8689d9c1dd733ed2d5ec9c6deb70f7'
+SHA256 = '52de8dbe2cb4e5d4b181a071c1b80da80a88c51c2042cacd6db1324e0d9f27cb'
 SDK = Path(os.environ.get('DEVKITPRO', '/opt/devkitpro'))
 PPC = Path(os.environ.get('DEVKITPPC', SDK / 'devkitPPC'))
 
@@ -58,7 +58,7 @@ def main():
     shutil.copy2(source/'COPYING', prefix/'licenses/hbc-agent/COPYING')
     shutil.copy2(source/'tools/hbc.py', prefix/'bin/hbc.py')
     shutil.copy2(source/'tools/wii-bench/wiibench.py', prefix/'bin/wiibench.py')
-    (prefix/'hbc-agent.json').write_text(json.dumps({'version':'1.10.0','revision':REVISION,'sha256':SHA256,'patch_sha256':hashlib.sha256(patch.read_bytes()).hexdigest()},indent=2)+'\n')
+    (prefix/'hbc-agent.json').write_text(json.dumps({'version':'1.10.2','revision':REVISION,'sha256':SHA256,'patch_sha256':hashlib.sha256(patch.read_bytes()).hexdigest()},indent=2)+'\n')
 
 if __name__ == '__main__':
     main()

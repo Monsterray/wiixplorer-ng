@@ -16,6 +16,7 @@ def function(source,signature):
 agent=(BASE/'sdk/hbc_agent/agent.c').read_text()
 a=agent.index('\t\ts = net_accept(ls,');b=agent.index('\n\t\t// Like HBC',a)
 block=agent[a:b]
+block='int listen_sock=ls; const unsigned my=1,gen=1;\n'+block
 tcp=(BASE/'channel/channelapp/source/tcp.c').read_text()
 code=r'''
 #include <cassert>

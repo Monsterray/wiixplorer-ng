@@ -651,7 +651,9 @@ transfers, and preserves the Dolphin gate before queuing hardware. Passwords
 are never written to test logs; private settings/artifacts remain ignored.
 
 SDK, official host client and project queue client now come from the pinned
-HBC-Reborn 1.10.0 source. Frozen artifacts include `hbc-agent.json` with the
+HBC-Reborn 1.10.2 source. Workstation validation prefers the shared
+`~/.wii-bench/wiibench.py` shim; portable checkouts use the pinned fallback.
+Frozen artifacts include `hbc-agent.json` with the
 commit, archive checksum and local patch checksum. The configured shared lease
 server remains the authority; this project does not restart another job's
 server/dispatcher. Historical research links retain their inspected revisions.

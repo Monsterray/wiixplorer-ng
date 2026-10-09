@@ -1,16 +1,3 @@
---- a/sdk/hbc_agent.h
-+++ b/sdk/hbc_agent.h
-@@ -258,6 +258,10 @@
-    negative error when the thread cannot start. Call once. */
- s32 hbc_agent_init(const hbc_agent_config *cfg);
- 
-+/* WiiXplorer addition: join the listener before unmounting devices.
-+   Call from the app thread, outside the HOME overlay. */
-+void hbc_agent_shutdown(void);
-+
- /* True once `hbc.py exit` or `hbc.py run` asked the app to exit. */
- bool hbc_agent_exit_requested(void);
- 
 --- a/sdk/hbc_agent/agent.c
 +++ b/sdk/hbc_agent/agent.c
 @@ -11,6 +11,7 @@
@@ -21,16 +8,7 @@
  #include <stdarg.h>
  #include <malloc.h>
  #include <stdio.h>
-@@ -74,6 +75,8 @@
- static u8 *stack;
- static u64 start_ticks;
- static volatile bool exit_requested;
-+// WiiXplorer: orderly shutdown keeps requests away from unmounted devices.
-+static volatile bool stop_requested;
- #if AGENT_TUXEDO
- static PPCExcptPanicFn prev_panic;
- #endif
-@@ -490,16 +493,17 @@
+@@ -511,16 +512,17 @@
  }
  
  // Leaves the app for HBC, through the reload stub like any other exit().
@@ -42,60 +20,19 @@
  		u64 t = gettime();
  
 -		while (ticks_to_millisecs(diff_ticks(t, gettime())) < cfg.exit_grace_ms)
-+		while (!stop_requested && ticks_to_millisecs(diff_ticks(t, gettime())) < cfg.exit_grace_ms)
++		while (!agent_stopped() && ticks_to_millisecs(diff_ticks(t, gettime())) < cfg.exit_grace_ms)
  			usleep(50 * 1000);
  	}
  
-+	if (stop_requested) return;
++	if (agent_stopped()) return; // The app stopped/joined us during teardown.
  	// The app did not exit by itself (or does not poll): do it here, above
  	// the app's threads so they cannot run into a half-shut-down system.
  	LWP_SetThreadPriority(LWP_GetSelf(), LWP_PRIO_HIGHEST);
-@@ -557,11 +561,13 @@
- 		devfile_reply(s, 0, NULL, 0);
- 		tcp_close(s);
- 		agent_exit();
-+		return;
- 	} else if (!memcmp(hdr, "HAXX", 4)) {
- 		// Uploads need HBC's loader. Close without reading, so the client
- 		// sees the upload fail, and go back to HBC for the retry.
- 		net_close(s);
- 		agent_exit();
-+		return;
- 	} else {
- 		devfile_reply(s, -ENOSYS, NULL, 0);
- 	}
-@@ -578,7 +584,7 @@
- 			if (res < 0 && res != -EBUSY)
- 				return res;
- 		}
--		while ((res = net_get_status()) == -EBUSY)
-+		while (!stop_requested && (res = net_get_status()) == -EBUSY)
- 			usleep(50 * 1000);
- 	}
- 	return res < 0 ? res : 0;
-@@ -591,7 +597,7 @@
- 	u8 hdr[16];
- 	(void) arg;
- 
--	while (true) {
-+	while (!stop_requested) {
- 		// The overlay's "hbc.py connection" switch.
- 		safety_poll(false);
- 		if (!agent_listen_enabled) {
-@@ -607,6 +613,7 @@
- 				usleep(AGENT_RETRY_MS * 1000);
- 				continue;
- 			}
-+			if (stop_requested) break;
- 			mask = net_gethostip() & 0xffff0000;
- 			ls = tcp_listen(LD_TCP_PORT, 3);
- 			if (ls < 0) {
-@@ -644,15 +651,25 @@
+@@ -685,13 +687,22 @@
  			continue;
  		}
  
-+        // POSIX accepted sockets need not inherit O_NONBLOCK. All protocol
-+        // receive deadlines require nonblocking reads, including on Dolphin.
++        // Accepted POSIX sockets do not inherit the listener's nonblocking mode.
 +        s32 flags = net_fcntl(s, F_GETFL, 0);
 +        if (flags < 0 || net_fcntl(s, F_SETFL, flags | 4) < 0) {
 +            net_close(s);
@@ -103,40 +40,22 @@
 +        }
 +
  		// Like HBC, answer only the Wii's own /16.
- 		if ((sa.sin_addr.s_addr & 0xffff0000) != mask ||
- 				!tcp_read_timeout(s, hdr, sizeof(hdr), NULL, NULL, LD_HEADER_TIMEOUT)) {
+ 		in_request = true;
+-		if ((sa.sin_addr.s_addr & 0xffff0000) != mask ||
++		if (!may_listen(my) || (sa.sin_addr.s_addr & 0xffff0000) != mask ||
+ 				!tcp_read_timeout(s, hdr, sizeof(hdr), NULL, NULL, LD_HEADER_TIMEOUT))
  			net_close(s);
- 			continue;
- 		}
-+		if (stop_requested) { net_close(s); break; }
- 		handle(s, hdr, sa.sin_addr.s_addr);
++		else if (may_listen(my))
++			handle(s, hdr, sa.sin_addr.s_addr);
+ 		else
+-			handle(s, hdr, sa.sin_addr.s_addr);
++			net_close(s);
+ 		in_request = false;
  		request_ticks += diff_ticks(woke, gettime());
  	}
-+	if (ls >= 0) net_close(ls);
- 	return NULL;
- }
- 
-@@ -990,3 +1007,17 @@
- 	}
- 	return res < 0 ? res : 0;
- }
-+
-+// WiiXplorer addition: no callback/thread may outlive the mounted devices.
-+void hbc_agent_shutdown(void) {
-+	stop_requested = true;
-+	devfile_abort();
-+	if (thread != LWP_THREAD_NULL && !cfg.no_network)
-+		LWP_JoinThread(thread, NULL);
-+	thread = LWP_THREAD_NULL;
-+	free(stack);
-+	stack = NULL;
-+	devstream_release();
-+	if (devoptab_list[STD_OUT] == &log_dotab_out) devoptab_list[STD_OUT] = log_prev_out;
-+	if (devoptab_list[STD_ERR] == &log_dotab_err) devoptab_list[STD_ERR] = log_prev_err;
-+}
 --- a/sdk/hbc_agent/overlay.c
 +++ b/sdk/hbc_agent/overlay.c
-@@ -1366,7 +1366,7 @@
+@@ -1368,7 +1368,7 @@
  
  static int last_chan = -1;
  
@@ -145,7 +64,7 @@
  	static u32 key_wait;
  	unsigned out = 0;
  	int chan;
-@@ -1374,7 +1374,9 @@
+@@ -1376,7 +1376,9 @@
  	// Keys from the PC, one every 12 frames so animations can finish.
  	if (key_wait)
  		key_wait--;
@@ -156,7 +75,7 @@
  		switch (agent_key_pop()) {
  		case 'u': out = OV_UP; break;
  		case 'd': out = OV_DOWN; break;
-@@ -1568,7 +1570,7 @@
+@@ -1570,7 +1572,7 @@
  			agent_cfg()->on_frame(agent_cfg()->user);
  		poll(&r);
  		ir_update(r.w, r.h);
@@ -165,7 +84,7 @@
  		pointing = ir_read(px, py, pa);
  		ov_point(&ui, px, py, pa, pointing, last_chan);
  		us = ticks_to_microsecs(diff_ticks(t0, gettime()));
-@@ -1577,7 +1579,7 @@
+@@ -1579,7 +1581,7 @@
  		cal_sample();
  		fx_tick();
  		// An Exit choice the app handles: close everything first.
@@ -432,7 +351,7 @@
  /* The overlay is open, or the app holds the hang watchdog (a load). */
 --- a/sdk/hbc_agent/safety.c
 +++ b/sdk/hbc_agent/safety.c
-@@ -556,6 +556,7 @@
+@@ -582,6 +582,7 @@
  		if (b == 1) {
  			printf("%s: Reset pressed: exiting to HBC\n", cfg->name ? cfg->name : "app");
  			agent_request_exit();

@@ -47,12 +47,15 @@ source checksums, Git revision, build flags, and output hashes.
 ## HBC-Reborn agent
 
 `scripts/build-hbc-agent.py` pins [HBC-Reborn commit
-a797ba98539e863a47409bfd8d62e4cf43f84d9d](https://github.com/Monsterray/hbc-reborn/tree/a797ba98539e863a47409bfd8d62e4cf43f84d9d),
-archive SHA-256 `ba7021289fb10368323f39e9707e9cfd4002fd84ab01fc612063cbb260cb6b4c`.
-This is upstream master HBC-Reborn 1.10.0, verified on 2026-10-07. The SDK builds with official libogc, `-O2 -g`, and its upstream two-slot transfer
+0c2e3d9f7f8689d9c1dd733ed2d5ec9c6deb70f7](https://github.com/Monsterray/hbc-reborn/tree/0c2e3d9f7f8689d9c1dd733ed2d5ec9c6deb70f7),
+archive SHA-256 `52de8dbe2cb4e5d4b181a071c1b80da80a88c51c2042cacd6db1324e0d9f27cb`.
+This is upstream master HBC-Reborn 1.10.2, verified on 2026-10-09. The SDK builds with official libogc, `-O2 -g`, and its upstream two-slot transfer
 configuration. Source, build and the official host client stay under `.deps/`.
-The tracked `scripts/patches/hbc-agent.patch` adds graceful listener shutdown
-and closes HOME on remote exit. The app reserves the SDK's persistent MEM2
+The tracked `scripts/patches/hbc-agent.patch` closes HOME on remote exit and lets a polling exit request return after
+the app stops the SDK. Graceful shutdown now uses upstream `hbc_agent_stop()`
+instead of the old local shutdown implementation. The SDK rolls back hooks on
+failed initialization; the app marks it ready only on success. Stop errors are
+reported; physical stop/IOS-stall behavior remains pending validation. The app reserves the SDK's persistent MEM2
 netlog/crash/last-log records and joins the listener before unmounting devices. The network/crash
 features are enabled in debug builds; the HOME overlay is present in both.
 The patch removes `noreturn` from the now-returning exit-request wrapper and
@@ -109,3 +112,25 @@ opening/closing, rather than consuming navigation that the UI ignores during
 animation. Its upstream pin and public API remain unchanged. Host sanitizer
 checks compile the real SDK input queue and portable UI; Dolphin checks both
 app callbacks and exit.
+
+## Shared workstation tools
+
+On this workstation, the canonical upstream checkout is
+`/Users/monsterray/Agent Folders/hbc-reborn` (1.10.2 at the pin above). The
+upstream SDK builds at `sdk/hbc_agent/libhbcagent.a` (libogc) and
+`sdk/hbc_agent/libogc2/libhbcagent.a` (libogc2); other Wii apps can use the
+upstream documented include/link paths for their matching toolchain. The local
+libogc2 build needs `EXTRA_CFLAGS="-I/opt/devkitpro/libogc2/wii/include
+-include ogc/libversion.h"` to use the installed layout and select its exception
+frame fields (the same approach used by Wii64). This shared SDK is unpatched;
+WiiXplorer's allocator/transfer integration stays in its reproducible local pin.
+
+The official `wiibench.py setup` shim at `~/.wii-bench/wiibench.py` follows that
+checkout and retains the existing shared queue, history and lease-server setting.
+`/usr/local/bin/wiibench.py`, `hbc.py` and `wii-bench-monitor` expose the shared
+shim, upstream HBC client and monitor on PATH. Pulling the canonical checkout
+updates these tools for every app using them; it does not update an already
+running dispatcher or an app's compiled SDK. WiiXplorer validation prefers the
+shared shim when present, then its pinned copy for portable contributor setups;
+`WII_BENCH_CLIENT` still overrides either. No private server or replacement queue
+was created, and no installed Wii channel was changed.

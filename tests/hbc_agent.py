@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the production MEM2 reservation and patched agent teardown with host stubs."""
+"""Check the production MEM2 reservation and upstream stop integration with host stubs."""
 from pathlib import Path
 import os
 import subprocess
@@ -76,32 +76,24 @@ int main() {
  MEM2_init(0);assert(!heapEnd && arena==(void*)0x90100000);
 }
 '''
-# This routine is an addition in the tracked patch; compile its real body.
-patch = (ROOT/'scripts/patches/hbc-agent.patch').read_text()
-added = '\n'.join(line[1:] for line in patch.splitlines() if line.startswith('+') and not line.startswith('+++'))
+# Exercise the app's production wrapper around the new upstream stop API.
 shutdown = r'''
 #include <cassert>
-#include <cstdlib>
-static bool stop_requested;
-static int thread=7;
-#define LWP_THREAD_NULL 0
-struct { bool no_network=false; } cfg;
-static void *stack=malloc(128);
-static int order=0;
-void devfile_abort() { assert(stop_requested); assert(++order==1); }
-void LWP_JoinThread(int t, void *) { assert(t==7 && ++order==2); }
-void devstream_release() { assert(thread==0 && stack==nullptr); assert(++order==3); }
-#define STD_OUT 1
-#define STD_ERR 2
-static int log_dotab_out,log_dotab_err,prior_out,prior_err;
-static int *log_prev_out=&prior_out,*log_prev_err=&prior_err;
-static int *devoptab_list[]={nullptr,&log_dotab_out,&log_dotab_err};
+#include <cstdio>
+#define WX_DEBUG_BUILD 1
+using s32=int;
+static bool ready=true;
+static int stops=0,logs=0,stop_result=0;
+s32 hbc_agent_stop(){++stops;return stop_result;}
+void hbc_netlog_close(){++logs;}
 '''
-shutdown += function(added, 'void hbc_agent_shutdown(void) {')
+shutdown += function((ROOT/'source/Diagnostics/HbcAgent.cpp').read_text(), 'void HbcAgentShutdown()')
 shutdown += r'''
-int main() {
- hbc_agent_shutdown(); assert(order==3);
- assert(devoptab_list[STD_OUT]==log_prev_out && devoptab_list[STD_ERR]==log_prev_err);
+int main(){
+ HbcAgentShutdown();assert(stops==1 && logs==1 && !ready);
+ HbcAgentShutdown();assert(stops==1 && logs==1);
+ ready=true;stop_result=-110;
+ HbcAgentShutdown();assert(stops==2 && logs==2 && !ready);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='wiixplorer-agent-') as tmp:
@@ -111,4 +103,4 @@ with tempfile.TemporaryDirectory(prefix='wiixplorer-agent-') as tmp:
         subprocess.run([os.environ.get('CXX','c++'), '-std=c++11', '-Wno-int-to-void-pointer-cast', '-fsanitize=address,undefined',
                         str(path), '-o', str(out)], check=True)
         subprocess.run([str(out)],check=True)
-print('HBC agent: split heap reservation/routing and joined teardown passed')
+print('HBC agent: split heap reservation/routing and idempotent upstream stop wrapper passed')
