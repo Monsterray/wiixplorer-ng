@@ -99,3 +99,8 @@ and recorded. No application exit workaround or native FTP fix is claimed.
 See DEBUGGING.md for reproduction and the unverified Dolphin next-PC hypothesis.
 Normal-JIT exceptions still fail acceptance; no physical test was submitted
 through an interpreter-only gate.
+
+The latest 0.1.16 interpreter FTP diagnostic reached the SD protocol assertions
+but failed the unfinished-upload timeout response watchdog. The SDK remained
+responsive during that wait. It is a failed test, not FTP acceptance; USB and
+native FTP remain unconfirmed. All owned Dolphin processes were closed.

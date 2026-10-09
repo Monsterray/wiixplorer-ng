@@ -758,3 +758,16 @@ Dolphin instances. `--cpu-core jit|interpreter` is available in `dolphin.sh` and
 there is no automatic retry in a different mode or suppression of exceptions.
 An interpreter pass does not clear the normal-JIT release blocker. The validation
 runner rejects `--hardware --cpu-core interpreter` before launching or queuing.
+
+The 0.1.16 Dolphin-only interpreter FTP run
+(`validation-20261008-174803-baifws2e`, profile `dolphin.3ZeQ51`) rejected the bad
+password, authenticated, listed the mounted SD device and completed the SD
+roundtrip, directory, empty-file and append/resume assertions. It failed awaiting
+the unfinished-upload timeout response (`ftplib.voidresp`, 300-second host
+watchdog). USB was absent. During the wait the emulator SDK status still answered
+in 1.096 seconds as WiiXplorer NG; this distinguishes the FTP wait from a whole
+application hang. The old checkpoint covered all of these as `ftp-list`; the
+runner now records separate fixture/upload/download/list/empty/resume/idle
+boundaries. No timeout implementation fix is claimed: guest-clock progression
+and timeout configuration remain hypotheses requiring targeted measurements.
+The owned emulator was closed, and no physical job was submitted.
